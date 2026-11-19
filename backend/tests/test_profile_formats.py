@@ -8,7 +8,7 @@ from app.main import app
 client = TestClient(app)
 
 
-def test_xlsx_upload_and_profile(tmp_path, monkeypatch):
+def test_xlsx_upload_and_profile(tmp_path, monkeypatch, db_session):
     from app.services import settings as settings_module
 
     upload_dir = tmp_path / "raw"

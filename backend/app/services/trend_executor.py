@@ -1,21 +1,21 @@
-from __future__ import annotations
-
-import math
 from pathlib import Path
 
-import pandas as pd
+import duckdb
 
-from app.data.loaders.tabular import load_tabular_file
+from app.data.duckdb_engine import (
+    DuckDBEngineError,
+    connect_read_only,
+)
 from app.schemas.execution import (
-    Aggregation,
     AnalyticsExecutionRequest,
-    ExecutionOperation,
     TrendAnalyticsResponse,
-    TrendDataPoint,
-    TrendInterval,
 )
 from app.services.analytics_executor import AnalyticsExecutionError
-from app.services.analytics_executor import _stable_mean
+
+
+def _quote_identifier(identifier: str) -> str:
+    """Safely quote a SQL identifier."""
+    return '"' + identifier.replace('"', '""') + '"'
 
 
 def execute_trend(
@@ -23,160 +23,276 @@ def execute_trend(
     dataset_id: str,
     request: AnalyticsExecutionRequest,
 ) -> TrendAnalyticsResponse:
-    """Execute deterministic time-based aggregation."""
+    """
+    Execute time-based trend analysis using DuckDB.
 
-    if request.date_column is None:
-        raise AnalyticsExecutionError(
-            "Trend analysis requires a date column."
-        )
+    Supported intervals:
+    - Day
+    - Week
+    - Month
+    - Year
 
-    if request.interval is None:
-        raise AnalyticsExecutionError(
-            "Trend analysis requires a time interval."
-        )
+    Supported aggregations:
+    - COUNT
+    - SUM
+    - AVERAGE
+    - MIN
+    - MAX
+    - MEDIAN
+    """
 
-    if request.aggregation is None:
-        raise AnalyticsExecutionError(
-            "Trend analysis requires an aggregation."
-        )
+    connection = None
 
     try:
-        df = load_tabular_file(path)
-    except (OSError, ValueError, ImportError) as exc:
-        raise AnalyticsExecutionError(
-            "Unable to read the dataset."
-        ) from exc
+        connection = connect_read_only(path)
 
-    if df.empty:
-        raise AnalyticsExecutionError(
-            "Cannot execute analytics on an empty dataset."
-        )
+        date_column = request.date_column
+        column = request.column
+        interval = request.interval
+        aggregation = request.aggregation
 
-    if not df.columns.is_unique:
-        raise AnalyticsExecutionError(
-            "The dataset contains duplicate column names."
-        )
-
-    if request.column not in df.columns:
-        raise AnalyticsExecutionError(
-            f"Column '{request.column}' does not exist in the dataset."
-        )
-
-    if request.date_column not in df.columns:
-        raise AnalyticsExecutionError(
-            f"Date column '{request.date_column}' "
-            "does not exist in the dataset."
-        )
-
-    values = df[request.column]
-    dates = pd.to_datetime(
-        df[request.date_column],
-        errors="coerce",
-        utc=True,
-    )
-
-    if request.aggregation != Aggregation.COUNT:
-        if not pd.api.types.is_numeric_dtype(values):
+        if not date_column:
             raise AnalyticsExecutionError(
-                f"Aggregation '{request.aggregation.value}' "
-                "requires a numeric column."
+                "A date column must be selected for trend analysis."
             )
 
-        valid_values = values.dropna()
-
-        if not all(
-            math.isfinite(float(value))
-            for value in valid_values
-        ):
+        if not interval:
             raise AnalyticsExecutionError(
-                "The selected column contains non-finite numeric values."
+                "A time interval must be selected."
             )
 
-    valid_date_mask = dates.notna()
+        if not aggregation:
+            raise AnalyticsExecutionError(
+                "An aggregation must be selected."
+            )
 
-    if not valid_date_mask.any():
-        raise AnalyticsExecutionError(
-            "The date column contains no valid dates."
-        )
+        interval = interval.value.lower()
+        aggregation = aggregation.value.upper()
 
-    working = pd.DataFrame(
-        {
-            "_period": dates[valid_date_mask],
-            "_value": values[valid_date_mask],
+        frequencies = {
+            "day": "day",
+            "week": "week",
+            "month": "month",
+            "year": "year",
         }
-    )
 
-    frequency = {
-        TrendInterval.DAY: "D",
-        TrendInterval.WEEK: "W-SUN",
-        TrendInterval.MONTH: "MS",
-        TrendInterval.YEAR: "YS",
-    }[request.interval]
+        if interval not in frequencies:
+            raise AnalyticsExecutionError(
+                "Unsupported interval. Use day, week, month, or year."
+            )
 
-    working["_period"] = working["_period"].dt.tz_convert(None)
+        if aggregation not in {
+            "COUNT", "SUM", "AVERAGE", "MIN", "MAX", "MEDIAN"
+        }:
+            raise AnalyticsExecutionError(
+                "Unsupported aggregation. Use COUNT, SUM, AVERAGE, MIN, MAX, or MEDIAN."
+            )
 
-    grouped = working.groupby(
-        pd.Grouper(key="_period", freq=frequency),
-        sort=True,
-    )
+        if aggregation != "COUNT" and not column:
+            raise AnalyticsExecutionError(
+                "A measure column is required for this aggregation."
+            )
 
-    points: list[TrendDataPoint] = []
+        if column == date_column:
+            raise AnalyticsExecutionError(
+                "The date column and measure column must be different."
+            )
 
-    for period, group_df in grouped:
-        if group_df.empty:
-            continue
+        # Validate dataset schema.
+        schema = connection.execute(
+            "DESCRIBE SELECT * FROM dataset"
+        ).fetchall()
 
-        series = group_df["_value"]
-        valid_values = series.dropna()
+        column_names = [item[0] for item in schema]
 
-        valid_count = int(series.notna().sum())
-        null_count = int(series.isna().sum())
+        if len(column_names) != len(set(column_names)):
+            raise AnalyticsExecutionError(
+                "Dataset contains duplicate column names."
+            )
 
-        if request.aggregation == Aggregation.COUNT:
-            result = float(valid_count)
+        if date_column not in column_names:
+            raise AnalyticsExecutionError(
+                f"Date column '{date_column}' does not exist."
+            )
 
-        elif valid_values.empty:
-            result = None
+        if column and column not in column_names:
+            raise AnalyticsExecutionError(
+                f"Measure column '{column}' does not exist."
+            )
 
-        elif request.aggregation == Aggregation.SUM:
-            result = float(math.fsum(
-                float(value) for value in valid_values
-            ))
+        quoted_date = _quote_identifier(date_column)
 
-        elif request.aggregation == Aggregation.AVERAGE:
-            result = _stable_mean(valid_values)
+        row_count = connection.execute(
+            "SELECT COUNT(*) FROM dataset"
+        ).fetchone()[0]
+
+        if row_count == 0:
+            raise AnalyticsExecutionError(
+                "Cannot perform trend analysis on an empty dataset."
+            )
+
+        # Parse dates, treating invalid dates as NULL.
+        parsed_date = f"TRY_CAST({quoted_date} AS TIMESTAMP)"
+
+        valid_date_count = connection.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM dataset
+            WHERE {parsed_date} IS NOT NULL
+            """
+        ).fetchone()[0]
+
+        if valid_date_count == 0:
+            raise AnalyticsExecutionError(
+                f"Date column '{date_column}' contains no valid dates."
+            )
+
+        # Build the period expression.
+        if interval == "week":
+            period_expression = (
+                f"DATE_TRUNC('week', {parsed_date}) + INTERVAL '6 days'"
+            )
+        else:
+            period_expression = (
+                f"DATE_TRUNC('{frequencies[interval]}', {parsed_date})"
+            )
+
+        # Build aggregation and measure-count expressions.
+        if aggregation == "COUNT":
+            quoted_measure = _quote_identifier(column) if column else None
+
+            aggregate_expression = (
+                f"COUNT({quoted_measure})"
+                if quoted_measure
+                else "COUNT(*)"
+            )
+
+            valid_count_expression = aggregate_expression
+            null_count_expression = (
+                f"COUNT(*) - COUNT({quoted_measure})"
+                if quoted_measure
+                else "0"
+            )
 
         else:
-            raise AnalyticsExecutionError(
-                "The requested aggregation is not supported."
+            quoted_measure = _quote_identifier(column)
+            converted_measure = (
+                f"TRY_CAST({quoted_measure} AS DOUBLE)"
             )
 
-        if result is not None and not math.isfinite(result):
-            raise AnalyticsExecutionError(
-                "The aggregation produced a non-finite result."
+            invalid_count = connection.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM dataset
+                WHERE {parsed_date} IS NOT NULL
+                  AND {quoted_measure} IS NOT NULL
+                  AND {converted_measure} IS NULL
+                """
+            ).fetchone()[0]
+
+            if invalid_count > 0:
+                raise AnalyticsExecutionError(
+                    f"Measure column '{column}' contains non-numeric values."
+                )
+
+            non_finite_count = connection.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM dataset
+                WHERE {parsed_date} IS NOT NULL
+                  AND {converted_measure} IS NOT NULL
+                  AND NOT ISFINITE({converted_measure})
+                """
+            ).fetchone()[0]
+
+            if non_finite_count > 0:
+                raise AnalyticsExecutionError(
+                    f"Measure column '{column}' contains non-finite values."
+                )
+
+            aggregate_functions = {
+                "SUM": f"FSUM({converted_measure})",
+                "AVERAGE": f"AVG({converted_measure})",
+                "MIN": f"MIN({converted_measure})",
+                "MAX": f"MAX({converted_measure})",
+                "MEDIAN": f"MEDIAN({converted_measure})",
+            }
+            aggregate_expression = aggregate_functions[aggregation]
+
+            valid_count_expression = (
+                f"COUNT({converted_measure})"
             )
 
-        points.append(
-            TrendDataPoint(
-                period=period.isoformat(),
-                value=result,
-                row_count=len(group_df),
-                valid_value_count=valid_count,
-                null_count=null_count,
+            null_count_expression = (
+                f"COUNT(*) - COUNT({converted_measure})"
             )
+
+        # Execute the time-based aggregation.
+        query = f"""
+            SELECT
+                {period_expression} AS period,
+                {aggregate_expression} AS metric,
+                COUNT(*) AS period_row_count,
+                {valid_count_expression} AS valid_value_count,
+                {null_count_expression} AS null_count
+            FROM dataset
+            WHERE {parsed_date} IS NOT NULL
+            GROUP BY period
+            ORDER BY period
+        """
+
+        results = connection.execute(query).fetchall()
+
+        points = []
+
+        for (
+            period,
+            metric,
+            period_row_count,
+            valid_value_count,
+            null_count,
+        ) in results:
+            points.append(
+                {
+                    "period": period.isoformat(),
+                    "value": (
+                        float(metric)
+                        if metric is not None
+                        else None
+                    ),
+                    "row_count": int(period_row_count),
+                    "valid_value_count": int(valid_value_count),
+                    "null_count": int(null_count),
+                }
+            )
+
+        return TrendAnalyticsResponse(
+            dataset_id=dataset_id,
+            operation=request.operation,
+            column=column,
+            date_column=date_column,
+            aggregation=request.aggregation,
+            interval=request.interval,
+            points=points,
         )
 
-    if not points:
+    except (
+        AnalyticsExecutionError,
+        FileNotFoundError,
+        DuckDBEngineError,
+    ):
+        raise
+
+    except duckdb.Error as exc:
         raise AnalyticsExecutionError(
-            "No valid time periods were available for trend analysis."
-        )
+            "DuckDB failed to execute trend analysis."
+        ) from exc
 
-    return TrendAnalyticsResponse(
-        dataset_id=dataset_id,
-        operation=ExecutionOperation.TREND,
-        column=request.column,
-        date_column=request.date_column,
-        aggregation=request.aggregation,
-        interval=request.interval,
-        points=points,
-    )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise AnalyticsExecutionError(
+            "Unable to process trend analysis results."
+        ) from exc
+
+    finally:
+        if connection is not None:
+            connection.close()

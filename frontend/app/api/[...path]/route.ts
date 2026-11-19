@@ -2,7 +2,9 @@ const BACKEND_URL =
   process.env.BACKEND_URL?.trim() || "http://127.0.0.1:8000";
 
 async function proxy(request: Request, path: string[]) {
-  const url = `${BACKEND_URL}/api/${path.join("/")}`;
+  const incomingUrl = new URL(request.url);
+
+  const url = `${BACKEND_URL}/api/${path.join("/")}${incomingUrl.search}`;
 
   const headers = new Headers(request.headers);
 
@@ -19,6 +21,7 @@ async function proxy(request: Request, path: string[]) {
         ? undefined
         : await request.arrayBuffer(),
     cache: "no-store",
+    signal: request.signal,
   });
 
   // Rebuild the response headers instead of forwarding potentially
@@ -46,6 +49,14 @@ export async function GET(
 }
 
 export async function POST(
+  request: Request,
+  context: { params: Promise<{ path: string[] }> }
+) {
+  const { path } = await context.params;
+  return proxy(request, path);
+}
+
+export async function DELETE(
   request: Request,
   context: { params: Promise<{ path: string[] }> }
 ) {

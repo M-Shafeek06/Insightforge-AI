@@ -3,78 +3,25 @@
 import math
 from pathlib import Path
 
-import pandas as pd
+import duckdb
 
-from app.data.loaders.tabular import load_tabular_file
+from app.data.duckdb_engine import (
+    DuckDBEngineError,
+    connect_read_only,
+)
+
 from app.schemas.execution import (
     AnalyticsExecutionRequest,
     DescriptiveAnalyticsResponse,
     DescriptiveStatistics,
 )
 
-
-def _stable_descriptive_mean(values: list[float]) -> float:
-    """Calculate a mean with reduced intermediate overflow risk."""
-    scale = max(abs(value) for value in values)
-
-    if scale == 0:
-        return 0.0
-
-    scaled_mean = math.fsum(value / scale for value in values) / len(values)
-    result = scale * scaled_mean
-
-    if not math.isfinite(result):
-        raise ValueError("The mean could not be calculated safely.")
-
-    return result
+from app.services.analytics_executor import AnalyticsExecutionError
 
 
-def _stable_descriptive_median(values: list[float]) -> float:
-    """Calculate the median while avoiding overflow when averaging."""
-    ordered_values = sorted(values)
-    middle = len(ordered_values) // 2
-
-    if len(ordered_values) % 2 == 1:
-        median_value = ordered_values[middle]
-    else:
-        lower = ordered_values[middle - 1]
-        upper = ordered_values[middle]
-
-        # Divide first to avoid overflow from adding large finite values.
-        median_value = lower / 2.0 + upper / 2.0
-
-    if not math.isfinite(median_value):
-        raise ValueError("Median could not be calculated safely.")
-
-    return median_value
-
-
-def _sample_standard_deviation(values: list[float]) -> float | None:
-    """Calculate sample standard deviation with scaled deviations."""
-    if len(values) < 2:
-        return None
-
-    scale = max(abs(value) for value in values)
-
-    if scale == 0:
-        return 0.0
-
-    scaled_values = [value / scale for value in values]
-    scaled_mean = math.fsum(scaled_values) / len(scaled_values)
-
-    squared_deviations = math.fsum(
-        (value - scaled_mean) ** 2 for value in scaled_values
-    )
-
-    scaled_std = math.sqrt(squared_deviations / (len(values) - 1))
-    standard_deviation = scale * scaled_std
-
-    if not math.isfinite(standard_deviation):
-        raise ValueError(
-            "Standard deviation could not be calculated safely."
-        )
-
-    return standard_deviation
+def _quote_identifier(identifier: str) -> str:
+    """Safely quote a DuckDB SQL identifier."""
+    return '"' + identifier.replace('"', '""') + '"'
 
 
 def execute_descriptive(
@@ -82,71 +29,226 @@ def execute_descriptive(
     dataset_id: str,
     request: AnalyticsExecutionRequest,
 ) -> DescriptiveAnalyticsResponse:
-    """Calculate descriptive statistics for a numeric dataset column."""
-    try:
-        df = load_tabular_file(path)
-    except (OSError, ValueError, ImportError) as exc:
-        raise ValueError("Unable to read the dataset.") from exc
 
-    if df.empty:
-        raise ValueError("Cannot execute analytics on an empty dataset.")
-
-    if not df.columns.is_unique:
-        raise ValueError("The dataset contains duplicate column names.")
-
-    column = request.column
-
-    if column not in df.columns:
-        raise ValueError(
-            f"Column '{column}' does not exist in the dataset."
-        )
-
-    original = df[column]
-    numeric = pd.to_numeric(original, errors="coerce")
-
-    invalid = original.notna() & numeric.isna()
-
-    if invalid.any():
-        raise ValueError(
-            f"Column '{column}' contains non-numeric values."
-        )
-
-    values = [float(value) for value in numeric.dropna().tolist()]
-
-    if not values:
-        raise ValueError(
-            f"Column '{column}' has no valid numeric values."
-        )
-
-    if not all(math.isfinite(value) for value in values):
-        raise ValueError(
-            f"Column '{column}' contains non-finite numeric values."
-        )
+    connection = None
 
     try:
-        mean_value = _stable_descriptive_mean(values)
-        median_value = _stable_descriptive_median(values)
-        minimum_value = min(values)
-        maximum_value = max(values)
-        standard_deviation = _sample_standard_deviation(values)
+        connection = connect_read_only(path)
 
-    except (OverflowError, ValueError) as exc:
-        raise ValueError(
-            "Descriptive statistics could not be calculated safely."
+        column = request.column
+
+        if not column:
+            raise AnalyticsExecutionError(
+                "A column must be selected for descriptive analysis."
+            )
+
+        schema = connection.execute(
+            "DESCRIBE SELECT * FROM dataset"
+        ).fetchall()
+
+        column_names = [item[0] for item in schema]
+
+        if len(column_names) != len(set(column_names)):
+            raise AnalyticsExecutionError(
+                "Dataset contains duplicate column names."
+            )
+
+        if column not in column_names:
+            raise AnalyticsExecutionError(
+                f"Column '{column}' does not exist in the dataset."
+            )
+
+        quoted = _quote_identifier(column)
+        converted = f"TRY_CAST({quoted} AS DOUBLE)"
+
+        row_count = connection.execute(
+            "SELECT COUNT(*) FROM dataset"
+        ).fetchone()[0]
+
+        if row_count == 0:
+            raise AnalyticsExecutionError(
+                "Cannot perform descriptive analysis on an empty dataset."
+            )
+
+        invalid_count = connection.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM dataset
+            WHERE {quoted} IS NOT NULL
+              AND {converted} IS NULL
+            """
+        ).fetchone()[0]
+
+        if invalid_count:
+            raise AnalyticsExecutionError(
+                f"Column '{column}' contains non-numeric values."
+            )
+
+        non_finite_count = connection.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM dataset
+            WHERE {converted} IS NOT NULL
+              AND NOT ISFINITE({converted})
+            """
+        ).fetchone()[0]
+
+        if non_finite_count:
+            raise AnalyticsExecutionError(
+                f"Column '{column}' contains non-finite numeric values."
+            )
+
+        valid_count, null_count = connection.execute(
+            f"""
+            SELECT
+                COUNT({converted}),
+                COUNT(*) - COUNT({converted})
+            FROM dataset
+            """
+        ).fetchone()
+
+        if valid_count == 0:
+            raise AnalyticsExecutionError(
+                f"Column '{column}' contains no valid numeric values."
+            )
+
+        # Calculate median without adding extremely large values.
+        middle_values = connection.execute(
+            f"""
+            WITH ordered AS (
+                SELECT
+                    {converted} AS value,
+
+                    ROW_NUMBER() OVER (
+                        ORDER BY {converted}
+                    ) AS row_number,
+
+                    COUNT({converted}) OVER () AS value_count
+
+                FROM dataset
+
+                WHERE {converted} IS NOT NULL
+            )
+
+            SELECT value
+
+            FROM ordered
+
+            WHERE row_number IN (
+                CAST(FLOOR((value_count + 1) / 2.0) AS BIGINT),
+                CAST(FLOOR((value_count + 2) / 2.0) AS BIGINT)
+            )
+
+            ORDER BY row_number
+            """
+        ).fetchall()
+
+        if len(middle_values) == 1:
+
+            median = float(middle_values[0][0])
+
+        elif len(middle_values) == 2:
+
+            median = (
+                float(middle_values[0][0]) / 2.0
+                + float(middle_values[1][0]) / 2.0
+            )
+
+        else:
+            raise AnalyticsExecutionError(
+                "Unable to calculate the median for the selected column."
+            )
+
+        # Calculate mean and sample standard deviation using scaled values.
+        # Scaling prevents intermediate overflow for very large finite values.
+        mean, minimum, maximum, standard_deviation = (
+            connection.execute(
+                f"""
+                WITH scaled AS (
+                    SELECT
+                        {converted} AS value,
+
+                        MAX(
+                            ABS({converted})
+                        ) OVER () AS scale
+
+                    FROM dataset
+                )
+
+                SELECT
+                    (
+                        FSUM(
+                            value / NULLIF(scale, 0)
+                        )
+                        / COUNT(value)
+                        * MAX(scale)
+                    ) AS mean,
+
+                    MIN(value) AS minimum,
+
+                    MAX(value) AS maximum,
+
+                    (
+                        STDDEV_SAMP(
+                            value / NULLIF(scale, 0)
+                        )
+                        * MAX(scale)
+                    ) AS standard_deviation
+
+                FROM scaled
+                """
+            ).fetchone()
+        )
+
+        statistics = {
+            "mean": mean,
+            "median": median,
+            "minimum": minimum,
+            "maximum": maximum,
+            "standard_deviation": standard_deviation,
+        }
+
+        # Reject non-finite statistical results.
+        for name, value in statistics.items():
+
+            if value is not None and not math.isfinite(float(value)):
+                raise AnalyticsExecutionError(
+                    f"The descriptive {name} calculation produced "
+                    "a non-finite result."
+                )
+
+        return DescriptiveAnalyticsResponse(
+            dataset_id=dataset_id,
+            operation=request.operation,
+            column=column,
+            row_count=int(row_count),
+            valid_value_count=int(valid_count),
+            null_count=int(null_count),
+            statistics=DescriptiveStatistics(
+                mean=float(mean),
+                median=float(median),
+                minimum=float(minimum),
+                maximum=float(maximum),
+                standard_deviation=(
+                    float(standard_deviation)
+                    if standard_deviation is not None
+                    else None
+                ),
+            ),
+        )
+
+    except (
+        AnalyticsExecutionError,
+        FileNotFoundError,
+        DuckDBEngineError,
+    ):
+        raise
+
+    except duckdb.Error as exc:
+        raise AnalyticsExecutionError(
+            "DuckDB failed to execute descriptive analysis."
         ) from exc
 
-    return DescriptiveAnalyticsResponse(
-        dataset_id=dataset_id,
-        operation="descriptive",
-        column=column,
-        row_count=len(df),
-        valid_value_count=len(values),
-        null_count=int(original.isna().sum()),
-        statistics=DescriptiveStatistics(
-            mean=mean_value,
-            median=median_value,
-            minimum=minimum_value,
-            maximum=maximum_value,
-            standard_deviation=standard_deviation,
-        ),
-    )
+    finally:
+        if connection is not None:
+            connection.close()

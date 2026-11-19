@@ -46,10 +46,24 @@ function formatAggregation(
   switch (aggregation) {
     case "sum":
       return "Sum";
+
     case "average":
       return "Average";
+
     case "count":
       return "Count";
+
+    case "min":
+      return "Minimum";
+
+    case "median":
+      return "Median";
+
+    case "max":
+      return "Maximum";
+
+    default:
+      return "Unknown aggregation";
   }
 }
 

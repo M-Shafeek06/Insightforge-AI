@@ -48,6 +48,14 @@ function formatAggregation(
       return "average";
     case "count":
       return "count of non-null values";
+    case "min":
+      return "minimum";
+    case "median":
+      return "median";
+    case "max":
+      return "maximum";
+    default:
+      return "calculated value";
   }
 }
 
@@ -651,8 +659,12 @@ export function generateBusinessInsights(
 
     case "correlation":
       return buildCorrelationInsights(result);
+
+    default:
+      return [];
   }
 }
+
 
 export function getBusinessInsightSummary(
   insights: BusinessInsight[]

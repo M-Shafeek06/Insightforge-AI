@@ -212,6 +212,34 @@ def test_average_rejects_text_column(tmp_path, monkeypatch):
     assert "requires a numeric column" in response.json()["detail"]
 
 
+def test_kpi_median_success(tmp_path, monkeypatch):
+    dataset_id = create_dataset(
+        tmp_path,
+        monkeypatch,
+        "sales.csv",
+        "Sales\n100\n200\n300\n",
+    )
+
+    response = execute_kpi(
+        dataset_id,
+        "Sales",
+        "median",
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["dataset_id"] == dataset_id
+    assert data["operation"] == "kpi"
+    assert data["column"] == "Sales"
+    assert data["aggregation"] == "median"
+    assert data["value"] == 200.0
+    assert data["row_count"] == 3
+    assert data["valid_value_count"] == 3
+    assert data["null_count"] == 0
+
+
 def test_unsupported_aggregation_returns_422(
     tmp_path,
     monkeypatch,
@@ -226,7 +254,7 @@ def test_unsupported_aggregation_returns_422(
     response = execute_kpi(
         dataset_id,
         "Sales",
-        "median",
+        "mode",
     )
 
     assert response.status_code == 422
@@ -674,23 +702,17 @@ def test_grouped_execution_excludes_unobserved_categories(
     tmp_path,
     monkeypatch,
 ):
-    import pandas as pd
+    from app.services.settings import settings
 
-    from app.services.analytics_executor import execute_grouped_kpi
-
-    df = pd.DataFrame(
-        {
-            "Region": pd.Categorical(
-                ["North", "South"],
-                categories=["North", "South", "Unused"],
-            ),
-            "Sales": [100, 200],
-        }
-    )
-
-    monkeypatch.setattr(
-        "app.services.analytics_executor.load_tabular_file",
-        lambda path: df,
+    dataset_id = create_dataset(
+        tmp_path,
+        monkeypatch,
+        "regions.csv",
+        (
+            "Region,Sales\n"
+            "North,100\n"
+            "South,200\n"
+        ),
     )
 
     request = AnalyticsExecutionRequest(
@@ -701,16 +723,18 @@ def test_grouped_execution_excludes_unobserved_categories(
     )
 
     result = execute_grouped_kpi(
-        path=tmp_path / "unused.csv",
-        dataset_id="test_dataset",
+        path=settings.upload_dir / f"{dataset_id}.csv",
+        dataset_id=dataset_id,
         request=request,
     )
 
-    actual_groups = {group.group for group in result.groups}
+    actual_groups = {
+        group.group
+        for group in result.groups
+    }
 
     assert actual_groups == {"North", "South"}
     assert "Unused" not in actual_groups
-
 
 # ---------------------------------------------------------------------
 # Stage 13A: Analytics execution edge-case regression tests

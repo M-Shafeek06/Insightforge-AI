@@ -1,6 +1,10 @@
 ﻿import re
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from app.db import get_db
+from app.services.analytics_persistence import save_analytics_execution
 
 from app.schemas.execution import (
     AnalyticsExecutionRequest,
@@ -38,6 +42,7 @@ router = APIRouter(
 def execute_dataset_analysis(
     dataset_id: str,
     request: AnalyticsExecutionRequest,
+    db: Session = Depends(get_db),
 ) -> (
     AnalyticsExecutionResponse
     | GroupedAnalyticsExecutionResponse
@@ -47,7 +52,7 @@ def execute_dataset_analysis(
     | CorrelationAnalyticsResponse
 ):
     """
-    Execute a supported analytics operation.
+    Execute a supported analytics operation and persist its result.
 
     Supported operations:
     - KPI analysis
@@ -56,7 +61,18 @@ def execute_dataset_analysis(
     - Trend analysis
     - Segment comparison
     - Pearson correlation analysis
+
+    Execution workflow:
+    1. Validate dataset identifier.
+    2. Resolve the requested dataset version.
+    3. Execute the selected analytics operation.
+    4. Persist the execution configuration and result.
+    5. Return the analytics response.
     """
+
+    # ---------------------------------------------------------
+    # 1. Validate dataset identifier
+    # ---------------------------------------------------------
 
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", dataset_id):
         raise HTTPException(
@@ -65,13 +81,25 @@ def execute_dataset_analysis(
         )
 
     try:
+        # -----------------------------------------------------
+        # 2. Resolve requested dataset version
+        # -----------------------------------------------------
+
         path = find_dataset_path(
             dataset_id=dataset_id,
             upload_dir=settings.upload_dir,
+            version=request.version,
         )
 
-        # 1. Correlation analysis
+        # Store the execution result instead of returning early.
+        result = None
+
+        # -----------------------------------------------------
+        # 3. Correlation analysis
+        # -----------------------------------------------------
+
         if request.operation == ExecutionOperation.CORRELATION:
+
             if request.second_column is None:
                 raise HTTPException(
                     status_code=422,
@@ -96,122 +124,179 @@ def execute_dataset_analysis(
                     ),
                 )
 
-            return execute_correlation(
+            result = execute_correlation(
                 path=path,
                 dataset_id=dataset_id,
                 column=request.column,
                 second_column=request.second_column,
             )
 
-        # Other operations do not accept the correlation-only parameter.
-        if request.second_column is not None:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "second_column is supported only for correlation "
-                    "analysis."
-                ),
-            )
+        # -----------------------------------------------------
+        # 4. Operations other than correlation
+        # -----------------------------------------------------
 
-        # 2. Trend analysis
-        if request.operation == ExecutionOperation.TREND:
-            if request.group_by is not None:
-                raise HTTPException(
-                    status_code=422,
-                    detail="Trend analysis does not support group_by.",
-                )
+        else:
 
-            return execute_trend(
-                path=path,
-                dataset_id=dataset_id,
-                request=request,
-            )
-
-        # 3. Descriptive statistics
-        if request.operation == ExecutionOperation.DESCRIPTIVE:
-            if request.aggregation is not None:
+            if request.second_column is not None:
                 raise HTTPException(
                     status_code=422,
                     detail=(
-                        "Descriptive analytics does not accept "
-                        "an aggregation."
+                        "second_column is supported only for correlation "
+                        "analysis."
                     ),
                 )
 
-            if request.group_by is not None:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        "Descriptive analytics does not support group_by."
-                    ),
+            # -------------------------------------------------
+            # 4.1 Trend analysis
+            # -------------------------------------------------
+
+            if request.operation == ExecutionOperation.TREND:
+
+                if request.group_by is not None:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Trend analysis does not support group_by.",
+                    )
+
+                result = execute_trend(
+                    path=path,
+                    dataset_id=dataset_id,
+                    request=request,
                 )
 
-            if (
-                request.date_column is not None
-                or request.interval is not None
+            # -------------------------------------------------
+            # 4.2 Descriptive statistics
+            # -------------------------------------------------
+
+            elif request.operation == ExecutionOperation.DESCRIPTIVE:
+
+                if request.aggregation is not None:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "Descriptive analytics does not accept "
+                            "an aggregation."
+                        ),
+                    )
+
+                if request.group_by is not None:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "Descriptive analytics does not support group_by."
+                        ),
+                    )
+
+                if (
+                    request.date_column is not None
+                    or request.interval is not None
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "Descriptive analytics does not accept "
+                            "trend parameters."
+                        ),
+                    )
+
+                result = execute_descriptive(
+                    path=path,
+                    dataset_id=dataset_id,
+                    request=request,
+                )
+
+            # -------------------------------------------------
+            # 4.3 Segment comparison
+            # -------------------------------------------------
+
+            elif (
+                request.operation
+                == ExecutionOperation.SEGMENT_COMPARISON
             ):
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        "Descriptive analytics does not accept "
-                        "trend parameters."
-                    ),
+
+                if (
+                    request.date_column is not None
+                    or request.interval is not None
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "Segment comparison does not accept "
+                            "trend parameters."
+                        ),
+                    )
+
+                result = execute_segment_comparison(
+                    path=path,
+                    dataset_id=dataset_id,
+                    request=request,
                 )
 
-            return execute_descriptive(
-                path=path,
-                dataset_id=dataset_id,
-                request=request,
+            # -------------------------------------------------
+            # 4.4 KPI and grouped KPI analysis
+            # -------------------------------------------------
+
+            else:
+
+                if (
+                    request.date_column is not None
+                    or request.interval is not None
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "KPI operations do not accept trend parameters."
+                        ),
+                    )
+
+                if request.aggregation is None:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="KPI operations require an aggregation.",
+                    )
+
+                if request.group_by is not None:
+                    result = execute_grouped_kpi(
+                        path=path,
+                        dataset_id=dataset_id,
+                        request=request,
+                    )
+
+                else:
+                    result = execute_kpi(
+                        path=path,
+                        dataset_id=dataset_id,
+                        request=request,
+                    )
+
+        # -----------------------------------------------------
+        # 5. Persist successful analytics execution
+        # -----------------------------------------------------
+
+        if result is None:
+            raise AnalyticsExecutionError(
+                "Analytics execution did not produce a result."
             )
 
-        # 4. Segment comparison
-        if request.operation == ExecutionOperation.SEGMENT_COMPARISON:
-            if (
-                request.date_column is not None
-                or request.interval is not None
-            ):
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        "Segment comparison does not accept "
-                        "trend parameters."
-                    ),
-                )
-
-            return execute_segment_comparison(
-                path=path,
-                dataset_id=dataset_id,
-                request=request,
-            )
-
-        # 5. KPI and grouped KPI analysis
-        if (
-            request.date_column is not None
-            or request.interval is not None
-        ):
-            raise HTTPException(
-                status_code=422,
-                detail="KPI operations do not accept trend parameters.",
-            )
-
-        if request.aggregation is None:
-            raise HTTPException(
-                status_code=422,
-                detail="KPI operations require an aggregation.",
-            )
-
-        if request.group_by is not None:
-            return execute_grouped_kpi(
-                path=path,
-                dataset_id=dataset_id,
-                request=request,
-            )
-
-        return execute_kpi(
-            path=path,
+        execution_record = save_analytics_execution(
+            db=db,
             dataset_id=dataset_id,
-            request=request,
+            request_config=request.model_dump(mode="json", exclude_none=True),
+            result=result.model_dump(mode="json"),
         )
+
+        if execution_record is not None:
+            result.execution_id = execution_record.execution_id
+
+        # -----------------------------------------------------
+        # 6. Return analytics response
+        # -----------------------------------------------------
+
+        return result
+
+    # ---------------------------------------------------------
+    # Exception handling
+    # ---------------------------------------------------------
 
     except DatasetNotFoundError as exc:
         raise HTTPException(
@@ -219,7 +304,13 @@ def execute_dataset_analysis(
             detail=str(exc),
         ) from exc
 
-    except (AnalyticsExecutionError, ValueError) as exc:
+    except AnalyticsExecutionError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+        ) from exc
+
+    except ValueError as exc:
         raise HTTPException(
             status_code=422,
             detail=str(exc),

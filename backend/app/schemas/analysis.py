@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Literal
 
 class AnalysisPlanningRequest(BaseModel):
@@ -10,8 +10,24 @@ class AnalysisPlanningRequest(BaseModel):
     business_questions: list[str] = Field(
         default_factory=list,
         max_length=20,
-        description="Specific business questions to investigate.",
+        description="Specific business questions to investigate (maximum 500 characters each).",
     )
+
+    @field_validator("business_objective")
+    @classmethod
+    def validate_objective_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) < 5:
+            raise ValueError("Business objective must contain at least 5 non-whitespace characters.")
+        return value
+
+    @field_validator("business_questions")
+    @classmethod
+    def validate_business_questions(cls, values: list[str]) -> list[str]:
+        cleaned = [value.strip() for value in values if value and value.strip()]
+        if len(cleaned) > 20 or any(len(value) > 500 for value in cleaned):
+            raise ValueError("Provide at most 20 non-empty business questions, each no longer than 500 characters.")
+        return list(dict.fromkeys(cleaned))
 
 
 class RecommendedKPI(BaseModel):

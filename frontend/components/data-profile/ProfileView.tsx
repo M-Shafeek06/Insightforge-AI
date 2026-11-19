@@ -1,25 +1,40 @@
-﻿"use client";
+"use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import ThemeToggle from "@/components/theme/ThemeToggle";
+import CleaningPanel from "@/components/data-profile/CleaningPanel";
+import type { CleaningExecution } from "@/lib/api/cleaning";
+import DatasetViewer from "@/components/data-profile/DatasetViewer";
+
 import AnalyticsExecutionPanel, {
   type AnalysisConfigurationRequest,
 } from "@/components/analytics/AnalyticsExecutionPanel";
+
 import {
   getDatasetProfile,
+  getDatasetVersions,
   uploadDataset,
+  getWorkbookSheets,
+  getDatasetWorksheetOptions,
+  selectDatasetWorksheet,
   type DatasetProfile,
+  type DatasetVersionRegistry,
 } from "@/lib/api/datasets";
+
 import {
   getDatasetQuality,
   type DatasetQuality,
   type QualityIssue,
 } from "@/lib/api/quality";
+
 import {
-  createAnalysisPlan,
+  createAIBusinessAnalysisPlan,
   type AnalysisPlan,
   type AnalysisQualityWarning,
+  type AIBusinessAnalysisResponse,
+  saveBusinessArtifact,
 } from "@/lib/api/analysis";
+import { downloadAnalyticsReport } from "@/lib/api/execution";
 
 const ACTIVE_DATASET_KEY = "insightforge-active-dataset";
 const PENDING_BROWSER_REFRESH_KEY = "insightforge-pending-browser-refresh";
@@ -56,56 +71,113 @@ function getSeverityStyle(severity: string): string {
   }
 }
 
+const SEVERITY_PRIORITY: Record<string, number> = {
+  critical: 4,
+  high: 3,
+  medium: 2,
+  low: 1,
+};
+
+/**
+ * Returns every quality finding for display.
+ * Findings are not deduplicated by column, so lower-severity findings
+ * remain visible even when the same column has a higher-severity finding.
+ */
+function getQualityIssuesForDisplay(issues: QualityIssue[]): QualityIssue[] {
+  const issueTypePriority = (issueType: string): number => {
+    switch (issueType.toLowerCase()) {
+      case "empty_column":
+        return 2;
+      case "missing_values":
+        return 1;
+      default:
+        return 0;
+    }
+  };
+
+  return issues
+    .filter((issue) =>
+      ["critical", "high", "medium", "low"].includes(
+        issue.severity.toLowerCase()
+      )
+    )
+    .slice()
+    .sort((a, b) => {
+      const severityDifference =
+        (SEVERITY_PRIORITY[b.severity.toLowerCase()] ?? 0) -
+        (SEVERITY_PRIORITY[a.severity.toLowerCase()] ?? 0);
+
+      if (severityDifference !== 0) return severityDifference;
+
+      const issueTypeDifference =
+        issueTypePriority(b.issue_type) - issueTypePriority(a.issue_type);
+
+      if (issueTypeDifference !== 0) return issueTypeDifference;
+
+      return (a.column ?? "").localeCompare(b.column ?? "");
+    });
+}
+
 function QualityIssueCard({ issue }: { issue: QualityIssue }) {
+  const severityAccent: Record<string, string> = {
+    critical: "border-l-red-500",
+    high: "border-l-orange-500",
+    medium: "border-l-amber-500",
+    low: "border-l-blue-500",
+  };
+
   return (
-    <article className="rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] p-5 transition-colors duration-200">
-      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
-        <div>
+    <article
+      className={`quality-issue-card flex h-full flex-col rounded-xl border border-[var(--border)] border-l-4 ${
+        severityAccent[issue.severity.toLowerCase()] ?? "border-l-[var(--accent)]"
+      } bg-[var(--surface-secondary)] px-3.5 py-3 shadow-sm transition-all duration-200 sm:px-4 sm:py-3.5`}
+    >
+      <div className="flex flex-col justify-between gap-2.5 sm:flex-row sm:items-center">
+        <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <span
-              className={`rounded-full border px-2.5 py-1 text-xs font-semibold uppercase ${getSeverityStyle(issue.severity)}`}
+              className={`rounded-md border px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide ${getSeverityStyle(issue.severity)}`}
             >
               {issue.severity}
             </span>
 
-            <span className="text-xs text-[var(--foreground-secondary)]">
+            <span className="text-xs font-medium capitalize tracking-wide text-[var(--foreground-secondary)]">
               {issue.issue_type.replaceAll("_", " ")}
             </span>
           </div>
 
-          <h4 className="mt-3 text-base font-semibold text-[var(--foreground)]">
+          <h4 className="mt-1.5 text-sm font-bold tracking-tight text-[var(--foreground)]">
             {issue.column ?? "Dataset"}
           </h4>
 
-          <p className="mt-2 text-sm leading-6 text-[var(--foreground-secondary)]">
+          <p className="mt-1 max-w-4xl text-xs leading-5 text-[var(--foreground-secondary)]">
             {issue.message}
           </p>
         </div>
 
-        <div className="shrink-0 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 sm:text-right">
-          <p className="text-lg font-semibold text-[var(--foreground)]">
+        <div className="quality-impact-metric grid min-w-[108px] shrink-0 grid-cols-2 items-center gap-x-2 gap-y-0.5 rounded-lg border border-[var(--border-strong)] bg-[var(--surface)] px-2.5 py-2 sm:grid-cols-1 sm:text-right">
+          <p className="text-base font-bold tabular-nums text-[var(--foreground)]">
             {issue.affected_rows.toLocaleString()}
           </p>
-
-          <p className="text-xs text-[var(--foreground-secondary)]">
+          <p className="text-[10px] font-medium text-[var(--foreground-secondary)] sm:order-2">
             Affected rows
           </p>
-
-          <p className="mt-1 text-xs text-[var(--foreground-secondary)]">
+          <p className="col-span-2 text-[10px] font-semibold tabular-nums text-[var(--foreground-secondary)] sm:col-span-1">
             {issue.affected_percentage.toLocaleString(undefined, {
               maximumFractionDigits: 2,
-            })}
-            %
+            })}% of dataset
           </p>
         </div>
       </div>
 
-      <div className="mt-4 rounded-lg border border-cyan-500/30 bg-cyan-500/5 p-4">
-        <p className="text-xs font-semibold uppercase tracking-wider text-cyan-700 dark:text-cyan-400">
-          Recommended action
-        </p>
-
-        <p className="mt-2 text-sm leading-6 text-[var(--foreground)]">
+      <div className="quality-recommendation mt-auto flex flex-col gap-1.5 rounded-lg border border-[var(--accent)]/30 bg-[var(--accent-soft)] px-3 py-2 pt-2.5 sm:flex-row sm:items-start sm:gap-3">
+        <div className="flex shrink-0 items-center gap-2">
+          <span className="h-1.5 w-1.5 rounded-full bg-[var(--accent)]" aria-hidden="true" />
+          <p className="text-[11px] font-bold uppercase tracking-wider text-[var(--accent-strong)]">
+            Recommended action
+          </p>
+        </div>
+        <p className="text-xs leading-5 text-[var(--foreground)]">
           {issue.recommendation}
         </p>
       </div>
@@ -369,39 +441,24 @@ function AnalysisPlanResults({
         </section>
       )}
 
-      <section>
-        <div className="mb-4">
-          <h4 className="text-lg font-semibold">Analysis Quality Warnings</h4>
-
-          <p className="mt-1 text-sm text-[var(--foreground-secondary)]">
-            Existing data-quality findings that should be considered before
-            executing the recommended analyses.
-          </p>
-        </div>
-
-        {plan.quality_warnings.length === 0 ? (
-          <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/5 p-5 text-sm text-[var(--foreground-secondary)]">
-            No quality warnings were returned by the current quality checks.
-          </div>
-        ) : (
-          <div className="space-y-4">
-            {plan.quality_warnings.map((warning, index) => (
-              <AnalysisQualityWarningCard
-                key={`${warning.issue_type}-${warning.column ?? "dataset"}-${index}`}
-                warning={warning}
-              />
-            ))}
-          </div>
-        )}
-      </section>
+      {/* Quality findings are presented once in the dedicated Data Quality section. */}
     </div>
   );
 }
 
 export default function ProfileView() {
-  const [profile, setProfile] = useState<DatasetProfile | null>(null);
+  const [versionRegistry, setVersionRegistry] =
+    useState<DatasetVersionRegistry | null>(null);
+  const [profile, setProfile] = useState<DatasetProfile | null>(null);  
+  const [versionError, setVersionError] = useState<string | null>(null);
+  const [switchingVersion, setSwitchingVersion] = useState(false);
   const [quality, setQuality] = useState<DatasetQuality | null>(null);
   const [loading, setLoading] = useState(false);
+  const [pendingWorkbook, setPendingWorkbook] = useState<File | null>(null);
+  const [workbookSheets, setWorkbookSheets] = useState<string[]>([]);
+  const [selectedSheet, setSelectedSheet] = useState("");
+  const [firstRowHeader, setFirstRowHeader] = useState(true);
+  const [worksheetDialogMode, setWorksheetDialogMode] = useState<"upload" | "switch">("upload");
   const [restoring, setRestoring] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [qualityError, setQualityError] = useState<string | null>(null);
@@ -409,8 +466,24 @@ export default function ProfileView() {
   const [businessObjective, setBusinessObjective] = useState("");
   const [businessQuestions, setBusinessQuestions] = useState<string[]>([""]);
   const [analysisPlan, setAnalysisPlan] = useState<AnalysisPlan | null>(null);
-  const [planning, setPlanning] = useState(false);
+
+  const [aiAnalysis, setAiAnalysis] =
+    useState<AIBusinessAnalysisResponse | null>(null);
+
+  const [aiPlanning, setAiPlanning] = useState(false);
+  const aiPlanningAbortRef = useRef<AbortController | null>(null);
+  const [savingAIPlan, setSavingAIPlan] = useState(false);
+  const [aiPlanSaved, setAiPlanSaved] = useState(false);
+  const [downloadingReport, setDownloadingReport] = useState(false);
+  const [reportDownloadError, setReportDownloadError] = useState<string | null>(null);
+
   const [planningError, setPlanningError] = useState<string | null>(null);
+
+  useEffect(() => {
+    return () => {
+      aiPlanningAbortRef.current?.abort();
+    };
+  }, []);
   const [requestedAnalysis, setRequestedAnalysis] =
     useState<AnalysisConfigurationRequest | null>(null);
 
@@ -438,9 +511,7 @@ export default function ProfileView() {
     };
   }, [refreshDialogOpen, refreshingWorkspace]);
 
-  // Ask the browser to confirm document unloads (toolbar refresh, tab close,
-  // or navigation away). Browsers do not expose which unload action was used,
-  // nor whether the native prompt was accepted, so this marker is best-effort.
+  // Ask the browser to confirm document unloads.
   useEffect(() => {
     function handleBeforeUnload(event: BeforeUnloadEvent) {
       try {
@@ -453,9 +524,6 @@ export default function ProfileView() {
       event.returnValue = "";
     }
 
-    // If the user cancels the native prompt, the document stays alive. Clear
-    // the marker shortly afterward so a later unrelated navigation is not
-    // mistaken for the canceled unload.
     function clearCanceledUnloadMarker() {
       window.setTimeout(() => {
         if (document.visibilityState === "visible") {
@@ -477,15 +545,15 @@ export default function ProfileView() {
     };
   }, []);
 
-  // Intercept common browser refresh shortcuts while this application is focused.
+  // Intercept common browser refresh shortcuts.
   useEffect(() => {
     function handleRefreshShortcut(event: KeyboardEvent) {
-      const key = event.key.toLowerCase();
+      if (typeof event.key !== "string") return;
+        const key = event.key.toLowerCase();
 
       const isRefreshShortcut =
         event.key === "F5" ||
-        ((event.ctrlKey || event.metaKey) &&
-          key === "r");
+        ((event.ctrlKey || event.metaKey) && key === "r");
 
       if (!isRefreshShortcut || event.altKey) return;
 
@@ -512,12 +580,7 @@ export default function ProfileView() {
     setRefreshingWorkspace(true);
 
     try {
-      // Remove only the active dataset reference.
-      // The backend dataset itself is not deleted.
       window.sessionStorage.removeItem(ACTIVE_DATASET_KEY);
-
-      // The initial restoration effect will find no saved dataset,
-      // so the application opens with an empty workspace.
       window.location.reload();
     } catch {
       setRefreshingWorkspace(false);
@@ -588,9 +651,13 @@ export default function ProfileView() {
     setError(null);
     setQualityError(null);
     setPlanningError(null);
-    setProfile(null);
+    // Keep the current profile mounted while the next version loads.
+    // This preserves AnalyticsExecutionPanel's per-version result cache.
+    setVersionRegistry(null);
+    setVersionError(null);
     setQuality(null);
     setAnalysisPlan(null);
+    setAiAnalysis(null);
     setRequestedAnalysis(null);
     setBusinessObjective("");
     setBusinessQuestions([""]);
@@ -598,6 +665,17 @@ export default function ProfileView() {
     try {
       const result = await getDatasetProfile(datasetId);
       setProfile(result);
+
+      try {
+        const registry = await getDatasetVersions(datasetId);
+        setVersionRegistry(registry);
+        setVersionError(null);
+      } catch (err) {
+        setVersionRegistry(null);
+        setVersionError(
+          err instanceof Error ? err.message : "Unable to load dataset versions."
+        );
+      }
 
       try {
         const qualityResult = await getDatasetQuality(datasetId);
@@ -616,10 +694,50 @@ export default function ProfileView() {
           : "Unable to restore the saved dataset."
       );
 
+      setVersionRegistry(null);
+      setProfile(null);
       window.sessionStorage.removeItem(ACTIVE_DATASET_KEY);
     } finally {
       setLoading(false);
     }
+  }
+
+  async function handleVersionChange(datasetId: string) {
+    if (!datasetId || datasetId === profile?.dataset_id || switchingVersion) return;
+
+    setSwitchingVersion(true);
+    try {
+      window.sessionStorage.setItem(ACTIVE_DATASET_KEY, datasetId);
+      await loadDataset(datasetId);
+    } finally {
+      setSwitchingVersion(false);
+    }
+  }
+
+    async function handleCleaningComplete(result: CleaningExecution) {
+    const cleanedDatasetId = result.cleaned_dataset_id;
+
+    if (!cleanedDatasetId) {
+      setError(
+        "Cleaning completed, but the cleaned dataset ID was not returned."
+      );
+      return;
+    }
+
+    try {
+      window.sessionStorage.setItem(
+        ACTIVE_DATASET_KEY,
+        cleanedDatasetId
+      );
+    } catch {
+      setError(
+        "Cleaning completed, but the active dataset session could not be updated."
+      );
+      return;
+    }
+
+    // Automatically activate the cleaned dataset.
+    await loadDataset(cleanedDatasetId);
   }
 
   useEffect(() => {
@@ -632,8 +750,6 @@ export default function ProfileView() {
         );
 
         if (pendingBrowserUnload === "1") {
-          // Best-effort reset after an accepted native browser unload prompt.
-          // The browser API cannot guarantee this was specifically a refresh.
           window.sessionStorage.removeItem(PENDING_BROWSER_REFRESH_KEY);
           window.sessionStorage.removeItem(ACTIVE_DATASET_KEY);
           return;
@@ -662,106 +778,199 @@ export default function ProfileView() {
     };
   }, []);
 
-  async function handleFile(file: File | undefined) {
-    if (!file) return;
-
+  async function processUpload(file: File, sheetName?: string, useFirstRowAsHeader = true) {
     setLoading(true);
     setError(null);
     setQualityError(null);
     setPlanningError(null);
     setProfile(null);
+    setVersionRegistry(null);
+    setVersionError(null);
     setQuality(null);
     setAnalysisPlan(null);
+    setAiAnalysis(null);
     setRequestedAnalysis(null);
     setBusinessObjective("");
     setBusinessQuestions([""]);
-
     try {
-      const uploaded = await uploadDataset(file);
-
-      window.sessionStorage.setItem(
-        ACTIVE_DATASET_KEY,
-        uploaded.dataset_id
-      );
-
-      const result = await getDatasetProfile(uploaded.dataset_id);
-      setProfile(result);
-
-      try {
-        const qualityResult = await getDatasetQuality(
-          uploaded.dataset_id
-        );
-        setQuality(qualityResult);
-      } catch (err) {
-        setQualityError(
-          err instanceof Error
-            ? err.message
-            : "Unable to assess dataset quality."
-        );
-      }
+      const uploaded = await uploadDataset(file, sheetName, useFirstRowAsHeader);
+      window.sessionStorage.setItem(ACTIVE_DATASET_KEY, uploaded.dataset_id);
+      await loadDataset(uploaded.dataset_id);
     } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Something went wrong while processing the dataset."
-      );
+      setError(err instanceof Error ? err.message : "Something went wrong while processing the dataset.");
     } finally {
       setLoading(false);
     }
   }
 
-  async function handleCreateAnalysisPlan(
-    event: FormEvent<HTMLFormElement>
-  ) {
-    event.preventDefault();
+  async function handleFile(file: File | undefined) {
+    if (!file) return;
+    if (file.name.toLowerCase().endsWith(".xlsx")) {
+      setLoading(true);
+      setError(null);
+      try {
+        const sheets = await getWorkbookSheets(file);
+        if (sheets.length >= 1) {
+          setPendingWorkbook(file);
+          setWorkbookSheets(sheets);
+          setSelectedSheet(sheets[0]);
+          setFirstRowHeader(true);
+          setWorksheetDialogMode("upload");
+          return;
+        }
+        await processUpload(file, sheets[0], true);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Unable to inspect the Excel workbook.");
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+    await processUpload(file);
+  }
+
+  async function confirmWorksheetSelection() {
+    if (!selectedSheet) return;
+    if (worksheetDialogMode === "upload") {
+      if (!pendingWorkbook) return;
+      const file = pendingWorkbook;
+      setPendingWorkbook(null);
+      setWorkbookSheets([]);
+      await processUpload(file, selectedSheet, firstRowHeader);
+      return;
+    }
 
     if (!profile) return;
-
-    const objective = businessObjective.trim();
-
-    if (objective.length < 5) {
-      setPlanningError(
-        "Enter a business objective containing at least 5 characters."
-      );
-      return;
-    }
-
-    if (objective.length > 1000) {
-      setPlanningError(
-        "The business objective cannot exceed 1,000 characters."
-      );
-      return;
-    }
-
-    const questions = businessQuestions
-      .map((question) => question.trim())
-      .filter(Boolean);
-
-    if (questions.length > 20) {
-      setPlanningError("You can submit a maximum of 20 business questions.");
-      return;
-    }
-
-    setPlanning(true);
-    setPlanningError(null);
-    setAnalysisPlan(null);
-
+    setLoading(true);
+    setError(null);
     try {
-      const result = await createAnalysisPlan(profile.dataset_id, {
+      const selected = await selectDatasetWorksheet(
+        profile.dataset_id,
+        selectedSheet,
+        firstRowHeader
+      );
+      window.sessionStorage.setItem(ACTIVE_DATASET_KEY, selected.dataset_id);
+      setPendingWorkbook(null);
+      setWorkbookSheets([]);
+      await loadDataset(selected.dataset_id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to switch worksheet.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function openWorksheetSwitcher() {
+    if (!profile || loading || switchingVersion) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const sheets = await getDatasetWorksheetOptions(profile.dataset_id);
+      setWorkbookSheets(sheets);
+      setSelectedSheet(sheets[0] ?? "");
+      setFirstRowHeader(true);
+      setWorksheetDialogMode("switch");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load workbook worksheets.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleCreateAIBusinessAnalysis(
+  event: FormEvent<HTMLFormElement>
+) {
+  event.preventDefault();
+
+  if (!profile) return;
+
+  const objective = businessObjective.trim();
+
+  if (objective.length < 5) {
+    setPlanningError(
+      "Enter a business objective containing at least 5 characters."
+    );
+    return;
+  }
+
+  if (objective.length > 1000) {
+    setPlanningError(
+      "The business objective cannot exceed 1,000 characters."
+    );
+    return;
+  }
+
+  const questions = businessQuestions
+    .map((question) => question.trim())
+    .filter(Boolean);
+
+  if (questions.length > 20) {
+    setPlanningError(
+      "You can submit a maximum of 20 business questions."
+    );
+    return;
+  }
+
+  aiPlanningAbortRef.current?.abort();
+  const controller = new AbortController();
+  aiPlanningAbortRef.current = controller;
+  setAiPlanning(true);
+  setPlanningError(null);
+
+  try {
+    const result = await createAIBusinessAnalysisPlan(
+      profile.dataset_id,
+      {
         business_objective: objective,
         business_questions: questions,
-      });
+      },
+      controller.signal
+    );
 
-      setAnalysisPlan(result);
-    } catch (err) {
+    setAiAnalysis(result);
+    setAnalysisPlan(result.analysis_plan);
+    setAiPlanSaved(false);
+  } catch (err) {
+    if (controller.signal.aborted || (err instanceof Error && err.name === "AbortError")) {
+      setPlanningError(null);
+    } else {
       setPlanningError(
         err instanceof Error
           ? err.message
-          : "Unable to generate the analysis plan."
+          : "Unable to generate AI business analysis."
       );
-    } finally {
-      setPlanning(false);
     }
+  } finally {
+    if (aiPlanningAbortRef.current === controller) {
+      aiPlanningAbortRef.current = null;
+      setAiPlanning(false);
+    }
+  }
+}
+
+  function handleCancelAIPlanning() {
+    aiPlanningAbortRef.current?.abort();
+    aiPlanningAbortRef.current = null;
+    setAiPlanning(false);
+    setPlanningError(null);
+  }
+
+  async function handleSaveAIPlan() {
+    if (!profile || !aiAnalysis || savingAIPlan || aiPlanSaved) return;
+    setSavingAIPlan(true); setPlanningError(null);
+    try {
+      await saveBusinessArtifact(profile.dataset_id, { artifact_type: "ai_business_plan", title: `AI Business Analysis Plan — ${aiAnalysis.refined_objective}`, payload: aiAnalysis as unknown as Record<string, unknown> });
+      setAiPlanSaved(true);
+    } catch (error) { setPlanningError(error instanceof Error ? error.message : "Unable to save AI business plan."); }
+    finally { setSavingAIPlan(false); }
+  }
+
+  async function handleDownloadSavedReport() {
+    if (!profile || downloadingReport) return;
+    setDownloadingReport(true); setReportDownloadError(null);
+    try { await downloadAnalyticsReport(profile.dataset_id); }
+    catch (error) { setReportDownloadError(error instanceof Error ? error.message : "Unable to download PDF report."); }
+    finally { setDownloadingReport(false); }
   }
 
   function updateBusinessQuestion(index: number, value: string) {
@@ -795,6 +1004,7 @@ export default function ProfileView() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [activeNav, setActiveNav] = useState("workspace");
 
+  // Track the section currently visible in the workspace.
   useEffect(() => {
     if (!profile) {
       setActiveNav("workspace");
@@ -803,8 +1013,11 @@ export default function ProfileView() {
 
     const sectionMap: Record<string, string> = {
       "dataset-overview": "overview",
+      "dataset-preview": "overview",
       "data-quality": "quality",
-      "analysis-planner-heading": "analysis",
+      "data-cleaning": "cleaning",
+      "analytics-execution-panel": "analysis",
+      "analysis-planner": "planner",
       "column-intelligence": "columns",
     };
 
@@ -861,7 +1074,46 @@ export default function ProfileView() {
   const isInitializing = restoring && !profile && !error;
 
   return (
-    <main className="app-pattern min-h-screen bg-[var(--background)] px-4 py-6 text-[var(--foreground)] transition-colors duration-200 sm:px-6 lg:px-8">
+    <>
+      {workbookSheets.length > 0 && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/60 p-4" role="dialog" aria-modal="true" aria-labelledby="worksheet-dialog-title">
+          <div className="w-full max-w-lg rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-6 shadow-2xl">
+            <h2 id="worksheet-dialog-title" className="text-lg font-semibold">
+              {worksheetDialogMode === "upload" ? "Choose a worksheet" : "Change worksheet"}
+            </h2>
+            <p className="mt-2 text-sm text-[var(--foreground-secondary)]">
+              {worksheetDialogMode === "upload"
+                ? "Select the worksheet you want to analyse."
+                : "A new dataset will be created from the selected worksheet. Your current worksheet and its saved analytics will remain unchanged."}
+            </p>
+            <label htmlFor="workbook-sheet-select" className="mt-5 block text-sm font-medium">Worksheet</label>
+            <select id="workbook-sheet-select" value={selectedSheet} onChange={(event) => setSelectedSheet(event.target.value)} className="mt-2 w-full rounded-lg border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-3 text-sm">
+              {workbookSheets.map((sheet) => <option key={sheet} value={sheet}>{sheet}</option>)}
+            </select>
+            <label className="mt-5 flex items-start gap-3 text-sm">
+              <input
+                type="checkbox"
+                checked={firstRowHeader}
+                onChange={(event) => setFirstRowHeader(event.target.checked)}
+                className="mt-0.5 h-4 w-4 accent-cyan-600"
+              />
+              <span>
+                <span className="block font-medium">Use first row as column headers</span>
+                <span className="mt-1 block text-xs text-[var(--foreground-secondary)]">
+                  Turn this off when the worksheet does not contain a header row.
+                </span>
+              </span>
+            </label>
+            <div className="mt-6 flex justify-end gap-3">
+              <button type="button" onClick={() => { setPendingWorkbook(null); setWorkbookSheets([]); }} className="rounded-lg border border-[var(--border)] px-4 py-2 text-sm">Cancel</button>
+              <button type="button" onClick={() => void confirmWorksheetSelection()} disabled={!selectedSheet || loading} className="rounded-lg bg-cyan-500 px-4 py-2 text-sm font-semibold text-slate-950 disabled:opacity-50">
+                {worksheetDialogMode === "upload" ? "Upload worksheet" : "Switch worksheet"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      <main className="app-pattern min-h-screen bg-[var(--background)] px-4 py-6 text-[var(--foreground)] transition-colors duration-200 sm:px-6 lg:px-8">
       <nav
         id="insightforge-navbar"
         aria-label="Main navigation"
@@ -892,15 +1144,22 @@ export default function ProfileView() {
             </span>
           </button>
 
-          <div className="hidden items-center gap-1 lg:flex">
+          {/* Desktop navigation */}
+          <div className="navbar-links-scroll hidden min-w-0 flex-1 items-center justify-center gap-1 lg:flex">
             {[
               { id: "workspace", label: "Workspace", target: "workspace" },
               { id: "overview", label: "Overview", target: "dataset-overview" },
               { id: "quality", label: "Data quality", target: "data-quality" },
+              { id: "cleaning", label: "Cleaning", target: "data-cleaning" },
+              {
+                id: "planner",
+                label: "Business planner",
+                target: "analysis-planner",
+              },
               {
                 id: "analysis",
                 label: "Analysis",
-                target: "analysis-planner-heading",
+                target: "analytics-execution-panel",
               },
               {
                 id: "columns",
@@ -1024,6 +1283,7 @@ export default function ProfileView() {
           </div>
         </div>
 
+        {/* Mobile navigation */}
         {mobileNavOpen && (
           <div
             id="insightforge-mobile-navigation"
@@ -1033,10 +1293,16 @@ export default function ProfileView() {
               { id: "workspace", label: "Workspace", target: "workspace" },
               { id: "overview", label: "Overview", target: "dataset-overview" },
               { id: "quality", label: "Data quality", target: "data-quality" },
+              { id: "cleaning", label: "Cleaning", target: "data-cleaning" },
+              {
+                id: "planner",
+                label: "Business planner",
+                target: "analysis-planner",
+              },
               {
                 id: "analysis",
                 label: "Analysis",
-                target: "analysis-planner-heading",
+                target: "analytics-execution-panel",
               },
               {
                 id: "columns",
@@ -1103,34 +1369,39 @@ export default function ProfileView() {
             </div>
           </header>
 
-          <label
-            className="workspace-upload glass-panel-interactive"
-            htmlFor="dataset-file-input"
-          >
-            <span className="upload-icon-wrap" aria-hidden="true">
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.7"
-                className="h-7 w-7"
-              >
-                <path
-                  d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-                <path
-                  d="M5 14.5v3A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5v-3"
-                  strokeLinecap="round"
-                />
-              </svg>
-            </span>
+          <div className="workspace-upload glass-panel-interactive">
+            <button
+              type="button"
+              className="upload-icon-button"
+              aria-label="Choose a CSV or XLSX dataset to upload"
+              disabled={loading || restoring}
+              onClick={() => document.getElementById("dataset-file-input")?.click()}
+            >
+              <span className="upload-icon-wrap" aria-hidden="true">
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.7"
+                  className="h-7 w-7"
+                >
+                  <path
+                    d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <path
+                    d="M5 14.5v3A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5v-3"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              </span>
+            </button>
 
             <span className="upload-title">Upload your dataset</span>
 
             <span className="upload-description">
-              Drop your file here or choose a file from your device.
+              Click the upload icon to choose a file from your device.
             </span>
 
             <span className="upload-formats">
@@ -1151,7 +1422,7 @@ export default function ProfileView() {
                 event.currentTarget.value = "";
               }}
             />
-          </label>
+          </div>
         </section>
 
         {isInitializing && (
@@ -1200,15 +1471,73 @@ export default function ProfileView() {
                 </h2>
               </div>
 
-              <p className="break-all font-mono text-xs text-[var(--foreground-secondary)]">
-                Dataset ID: {profile.dataset_id}
-              </p>
+              <div className="flex flex-col gap-3 md:items-end">
+                <p className="break-all font-mono text-xs text-[var(--foreground-secondary)]">
+                  Dataset ID: {profile.dataset_id}
+                </p>
+                {profile.worksheet_switchable && (
+                  <button
+                    type="button"
+                    onClick={() => void openWorksheetSwitcher()}
+                    disabled={loading || switchingVersion}
+                    className="w-fit rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold text-[var(--foreground)] transition hover:border-cyan-500 hover:text-cyan-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Change worksheet
+                  </button>
+                )}
+
+                {versionRegistry && versionRegistry.versions.length > 0 && (
+                  <div className="flex flex-col gap-1.5 md:items-end">
+                    <label htmlFor="dataset-version-selector" className="text-xs font-semibold uppercase tracking-wide text-[var(--foreground-secondary)]">
+                      Active dataset version
+                    </label>
+                    <select
+                      id="dataset-version-selector"
+                      value={profile.dataset_id}
+                      disabled={loading || switchingVersion}
+                      onChange={(event) => void handleVersionChange(event.target.value)}
+                      className="min-w-[260px] rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm text-[var(--foreground)] outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20 disabled:cursor-wait disabled:opacity-60"
+                    >
+                      {versionRegistry.versions
+                        .slice()
+                        .sort((a, b) => a.version_number - b.version_number)
+                        .map((version) => (
+                          <option key={version.dataset_id} value={version.dataset_id}>
+                            {`V${version.version_number} · ${version.version_type === "original" ? "Original" : "Cleaned"} · ${version.filename}`}
+                          </option>
+                        ))}
+                    </select>
+                    {switchingVersion && (
+                      <span className="text-xs text-cyan-600 dark:text-cyan-400">Switching dataset version...</span>
+                    )}
+                  </div>
+                )}
+
+                {versionError && (
+                  <p className="text-xs text-orange-700 dark:text-orange-300">
+                    Version history unavailable: {versionError}
+                  </p>
+                )}
+              </div>
             </div>
 
-            <section id="dataset-overview" className="scroll-mt-28">
-              <h3 className="mb-4 text-xl font-semibold">
-                Dataset Overview
-              </h3>
+            {/* 1. Unified Dataset Overview & Preview */}
+            <section
+              id="dataset-overview"
+              className="scroll-mt-28 space-y-7"
+              aria-labelledby="dataset-overview-heading"
+            >
+              <div>
+                <h3
+                  id="dataset-overview-heading"
+                  className="text-xl font-semibold tracking-tight"
+                >
+                  Dataset Overview &amp; Preview
+                </h3>
+                <p className="mt-1 text-sm text-[var(--foreground-secondary)]">
+                  Review dataset health metrics and explore the underlying records in one place.
+                </p>
+              </div>
 
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 {[
@@ -1228,187 +1557,322 @@ export default function ProfileView() {
                   </div>
                 ))}
               </div>
+
+              <DatasetViewer datasetId={profile.dataset_id} />
             </section>
 
-            <section id="data-quality" className="scroll-mt-28">
-              <div className="mb-4">
-                <h3 className="text-xl font-semibold">Data Quality</h3>
-                <p className="mt-1 text-sm text-[var(--foreground-secondary)]">
-                  Deterministic quality checks and explainable findings.
+            {/* 2. Data Quality */}
+              <section
+                id="data-quality"
+                className="scroll-mt-28"
+                aria-labelledby="data-quality-heading"
+              >
+                <div className="mb-5">
+                  <h3
+                    id="data-quality-heading"
+                    className="text-xl font-semibold"
+                  >
+                    Data Quality
+                  </h3>
+
+                  <p className="mt-1 text-sm text-[var(--foreground-secondary)]">
+                    Deterministic quality assessment, severity classification,
+                    and explainable recommendations to improve dataset reliability.
+                  </p>
+                </div>
+
+                {/* Quality Assessment Error */}
+                {qualityError && (
+                  <div
+                    role="alert"
+                    className="rounded-xl border border-red-500/40 bg-red-500/5 p-5"
+                  >
+                    <div className="flex items-start gap-3">
+                      <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-red-500/10 text-red-600 dark:text-red-400">
+                        <svg
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.8"
+                          className="h-5 w-5"
+                          aria-hidden="true"
+                        >
+                          <path
+                            d="M12 9v4m0 4h.01M10.3 3.9 2.8 17a2 2 0 0 0 1.7 3h15a2 2 0 0 0 1.7-3l-7.5-13.1a2 2 0 0 0-3.4 0Z"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
+                      </div>
+
+                      <div>
+                        <p className="font-semibold text-red-700 dark:text-red-300">
+                          Quality assessment unavailable
+                        </p>
+
+                        <p className="mt-2 text-sm leading-6 text-[var(--foreground-secondary)]">
+                          {qualityError}
+                        </p>
+
+                        <p className="mt-2 text-xs leading-5 text-[var(--foreground-secondary)]">
+                          Dataset profiling succeeded. You can continue reviewing
+                          your dataset profile while investigating the quality
+                          assessment issue.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Quality Assessment Loading */}
+                {!quality && !qualityError && loading && (
+                  <div
+                    role="status"
+                    className="rounded-xl border border-cyan-500/30 bg-cyan-500/5 p-5"
+                  >
+                    <p className="font-medium text-cyan-700 dark:text-cyan-300">
+                      Assessing dataset quality...
+                    </p>
+
+                    <p className="mt-2 text-sm text-[var(--foreground-secondary)]">
+                      Running deterministic quality checks and evaluating
+                      potential data-quality issues.
+                    </p>
+                  </div>
+                )}
+
+                {/* Quality Assessment Results */}
+                {quality && (
+                  <div className="space-y-5">
+
+                    {/* Quality Score and Severity Breakdown */}
+                    <div className="grid gap-5 lg:grid-cols-[1fr_2fr]">
+
+                      {/* Overall Quality Score */}
+                      <div className="glass-panel rounded-2xl border border-[var(--border)] p-6 transition-colors duration-200">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="text-sm font-medium text-[var(--foreground-secondary)]">
+                            Overall Quality Score
+                          </p>
+
+                          <span className="rounded-lg border border-[var(--border)] bg-[var(--surface-secondary)] px-2.5 py-1 text-xs font-semibold text-[var(--foreground-secondary)]">
+                            Quality Index
+                          </span>
+                        </div>
+
+                        <div className="mt-5 flex items-end gap-2">
+                          <span className="text-5xl font-bold tracking-tight">
+                            {quality.overall_score}
+                          </span>
+
+                          <span className="pb-1.5 text-lg text-[var(--foreground-secondary)]">
+                            / 100
+                          </span>
+                        </div>
+
+                        <div
+                          className="mt-5 h-2.5 overflow-hidden rounded-full bg-[var(--border)]"
+                          role="progressbar"
+                          aria-label="Overall dataset quality score"
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          aria-valuenow={quality.overall_score}
+                        >
+                          <div
+                            className="h-full rounded-full bg-cyan-500 transition-all duration-500 dark:bg-cyan-400"
+                            style={{
+                              width: `${Math.min(
+                                100,
+                                Math.max(0, quality.overall_score)
+                              )}%`,
+                            }}
+                          />
+                        </div>
+
+                        <div className="mt-4">
+                          <span
+                            className={`inline-flex rounded-full border px-3 py-1.5 text-sm font-semibold ${getStatusStyle(
+                              quality.quality_status
+                            )}`}
+                          >
+                            {quality.quality_status}
+                          </span>
+                        </div>
+
+                        <div className="mt-5 border-t border-[var(--border)] pt-4">
+                          <p className="text-sm leading-6 text-[var(--foreground-secondary)]">
+                            The quality score reflects issues identified by the
+                            current deterministic assessment rules. No changes
+                            are made to your original dataset during this process.
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Issue Breakdown */}
+                      <div className="glass-panel rounded-2xl border border-[var(--border)] p-6 transition-colors duration-200">
+                        <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-center">
+                          <div>
+                            <h4 className="font-semibold">
+                              Issue Breakdown
+                            </h4>
+
+                            <p className="mt-1 text-sm text-[var(--foreground-secondary)]">
+                              Distribution of detected data-quality issues.
+                            </p>
+                          </div>
+
+                          <span className="inline-flex w-fit rounded-full border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-1.5 text-xs font-semibold text-[var(--foreground-secondary)]">
+                            {quality.summary.total_issues} Total Issues
+                          </span>
+                        </div>
+
+                        <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                          {[
+                            {
+                              label: "Critical",
+                              count: quality.summary.critical,
+                              style:
+                                "border-red-500/40 bg-red-500/5 text-red-700 dark:text-red-300",
+                            },
+                            {
+                              label: "High",
+                              count: quality.summary.high,
+                              style:
+                                "border-orange-500/40 bg-orange-500/5 text-orange-800 dark:text-orange-300",
+                            },
+                            {
+                              label: "Medium",
+                              count: quality.summary.medium,
+                              style:
+                                "border-yellow-500/40 bg-yellow-500/5 text-yellow-800 dark:text-yellow-300",
+                            },
+                            {
+                              label: "Low",
+                              count: quality.summary.low,
+                              style:
+                                "border-blue-500/40 bg-blue-500/5 text-blue-700 dark:text-blue-300",
+                            },
+                          ].map((item) => (
+                            <div
+                              key={item.label}
+                              className={`rounded-xl border p-4 transition-colors duration-200 ${item.style}`}
+                            >
+                              <p className="text-sm font-medium">
+                                {item.label}
+                              </p>
+
+                              <p className="mt-2 text-2xl font-bold">
+                                {item.count}
+                              </p>
+
+                              <p className="mt-1 text-xs opacity-75">
+                                Detected
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+
+                        <div className="mt-5 border-t border-[var(--border)] pt-4">
+                          <p className="text-xs leading-5 text-[var(--foreground-secondary)]">
+                            Severity indicates the relative priority of each
+                            finding. All severity levels, including low, are
+                            retained and shown in the quality findings below.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Actionable Quality Issues */}
+                    {(() => {
+                      const visibleIssues = getQualityIssuesForDisplay(
+                        quality.issues
+                      );
+                      const displayedIssueCount = visibleIssues.length;
+
+                      return (
+                        <div className="quality-findings-panel rounded-2xl border border-[var(--border-strong)] bg-[var(--surface)] p-3.5 shadow-sm transition-colors duration-200 sm:p-4">
+                          <div className="mb-3 flex flex-col justify-between gap-2 sm:flex-row sm:items-center">
+                            <div>
+                              <h4 className="text-base font-bold tracking-tight">
+                                Quality Findings &amp; Recommended Actions
+                              </h4>
+
+                              <p className="mt-1 text-xs leading-5 text-[var(--foreground-secondary)]">
+                                Prioritized findings with affected-row impact and clear next steps. All detected severity levels are retained.
+                              </p>
+                            </div>
+
+                            <span className="inline-flex w-fit shrink-0 rounded-full border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-1.5 text-xs font-semibold text-[var(--foreground-secondary)]">
+                              {displayedIssueCount} Quality{" "}
+                              {displayedIssueCount === 1 ? "Finding" : "Findings"}
+                            </span>
+                          </div>
+
+                          {visibleIssues.length === 0 ? (
+                            <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/5 p-6">
+                              <p className="font-semibold text-emerald-700 dark:text-emerald-300">
+                                No quality issues detected
+                              </p>
+
+                              <p className="mt-2 text-sm leading-6 text-[var(--foreground-secondary)]">
+                                The quality assessment did not identify any
+                                findings across the supported severity levels.
+                              </p>
+                            </div>
+                          ) : (
+                            <div className="quality-findings-grid grid grid-cols-1 items-stretch gap-3 lg:grid-cols-2">
+                              {visibleIssues.map((issue, index) => (
+                                <QualityIssueCard
+                                  key={`${issue.issue_type}-${issue.column ?? "dataset"}-${index}`}
+                                  issue={issue}
+                                />
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+              </section>
+            {/* 4. Intelligent Data Cleaning */}
+            <section
+              id="data-cleaning"
+              className="scroll-mt-28"
+              aria-labelledby="data-cleaning-heading"
+            >
+              <div className="mb-5">
+                <h3
+                  id="data-cleaning-heading"
+                  className="text-xl font-semibold"
+                >
+                  Intelligent Data Cleaning
+                </h3>
+
+                <p className="mt-1 max-w-3xl text-sm leading-6 text-[var(--foreground-secondary)]">
+                  Review cleaning operations, generate before-and-after
+                  previews, approve your cleaning plan, and execute changes
+                  without modifying your original dataset.
                 </p>
               </div>
 
-              {qualityError && (
-                <div
-                  role="alert"
-                  className="rounded-xl border border-red-500/40 bg-red-500/5 p-5"
-                >
-                  <p className="font-medium text-red-700 dark:text-red-300">
-                    Quality assessment unavailable
-                  </p>
-
-                  <p className="mt-2 text-sm text-[var(--foreground-secondary)]">
-                    {qualityError}
-                  </p>
-
-                  <p className="mt-2 text-xs text-[var(--foreground-secondary)]">
-                    Dataset profiling succeeded. You can continue reviewing
-                    the profile while investigating the quality API error.
-                  </p>
-                </div>
-              )}
-
-              {quality && (
-                <div className="space-y-5">
-                  <div className="grid gap-5 lg:grid-cols-[1fr_2fr]">
-                    <div className="glass-panel rounded-2xl border border-[var(--border)] p-6 transition-colors duration-200">
-                      <p className="text-sm text-[var(--foreground-secondary)]">
-                        Overall quality score
-                      </p>
-
-                      <div className="mt-4 flex items-end gap-2">
-                        <span className="text-5xl font-bold tracking-tight">
-                          {quality.overall_score}
-                        </span>
-                        <span className="pb-1 text-lg text-[var(--foreground-secondary)]">
-                          / 100
-                        </span>
-                      </div>
-
-                      <div
-                        className="mt-5 h-2.5 overflow-hidden rounded-full bg-[var(--border)]"
-                        role="progressbar"
-                        aria-label="Data quality score"
-                        aria-valuemin={0}
-                        aria-valuemax={100}
-                        aria-valuenow={quality.overall_score}
-                      >
-                        <div
-                          className="h-full rounded-full bg-cyan-500 transition-all dark:bg-cyan-400"
-                          style={{
-                            width: `${quality.overall_score}%`,
-                          }}
-                        />
-                      </div>
-
-                      <span
-                        className={`mt-4 inline-flex rounded-full border px-3 py-1.5 text-sm font-semibold ${getStatusStyle(quality.quality_status)}`}
-                      >
-                        {quality.quality_status}
-                      </span>
-
-                      <p className="mt-4 text-sm leading-6 text-[var(--foreground-secondary)]">
-                        This score reflects the issues detected by the
-                        current deterministic quality rules. It does not
-                        modify your original dataset.
-                      </p>
-                    </div>
-
-                    <div className="glass-panel rounded-2xl border border-[var(--border)] p-6 transition-colors duration-200">
-                      <h4 className="font-semibold">Issue Breakdown</h4>
-
-                      <p className="mt-1 text-sm text-[var(--foreground-secondary)]">
-                        {quality.summary.total_issues} detected issue(s)
-                      </p>
-
-                      <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
-                        {[
-                          {
-                            label: "Critical",
-                            count: quality.summary.critical,
-                            style:
-                              "border-red-500/40 text-red-700 dark:text-red-300",
-                          },
-                          {
-                            label: "High",
-                            count: quality.summary.high,
-                            style:
-                              "border-orange-500/40 text-orange-800 dark:text-orange-300",
-                          },
-                          {
-                            label: "Medium",
-                            count: quality.summary.medium,
-                            style:
-                              "border-yellow-500/40 text-yellow-800 dark:text-yellow-300",
-                          },
-                          {
-                            label: "Low",
-                            count: quality.summary.low,
-                            style:
-                              "border-blue-500/40 text-blue-700 dark:text-blue-300",
-                          },
-                        ].map((item) => (
-                          <div
-                            key={item.label}
-                            className={`rounded-xl border bg-[var(--surface-secondary)] p-4 ${item.style}`}
-                          >
-                            <p className="text-sm">{item.label}</p>
-                            <p className="mt-2 text-2xl font-bold">
-                              {item.count}
-                            </p>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 transition-colors duration-200 sm:p-6">
-                    <div className="mb-5">
-                      <h4 className="text-lg font-semibold">
-                        Quality Issues & Recommended Actions
-                      </h4>
-
-                      <p className="mt-1 text-sm text-[var(--foreground-secondary)]">
-                        Review each finding before deciding whether any
-                        cleaning is appropriate.
-                      </p>
-                    </div>
-
-                    {quality.issues.length === 0 ? (
-                      <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/5 p-6">
-                        <p className="font-medium text-emerald-700 dark:text-emerald-300">
-                          No issues detected
-                        </p>
-
-                        <p className="mt-2 text-sm text-[var(--foreground-secondary)]">
-                          The current quality checks did not identify any
-                          issues in this dataset.
-                        </p>
-                      </div>
-                    ) : (
-                      <div className="space-y-4">
-                        {quality.issues.map((issue, index) => (
-                          <QualityIssueCard
-                            key={`${issue.issue_type}-${issue.column ?? "dataset"}-${index}`}
-                            issue={issue}
-                          />
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
+              <CleaningPanel
+                  datasetId={profile.dataset_id}
+                  columns={profile.columns_profile}
+                  onCleaningComplete={handleCleaningComplete}
+                />
             </section>
 
+            {/* AI Business Analysis Planner — its own navigation destination. */}
             <section
               id="analysis-planner"
               aria-labelledby="analysis-planner-heading"
-              className="glass-panel-elevated rounded-2xl border border-[var(--border)] p-5 sm:p-7"
+              className="glass-panel-elevated scroll-mt-28 rounded-2xl border border-[var(--border)] p-5 sm:p-7"
             >
-              <div
-                id="analytics-execution-panel"
-                className="scroll-mt-28"
-              >
-                <AnalyticsExecutionPanel
-                  profile={profile}
-                  requestedAnalysis={requestedAnalysis}
-                />
-              </div>
-
               <div className="mb-6">
                 <h3
                   id="analysis-planner-heading"
-                  className="mt-2 text-2xl font-semibold"
+                  className="mt-2 scroll-mt-32 text-2xl font-semibold"
                 >
                   Business Analysis Planner
                 </h3>
@@ -1421,7 +1885,7 @@ export default function ProfileView() {
               </div>
 
               <form
-                onSubmit={handleCreateAnalysisPlan}
+                onSubmit={handleCreateAIBusinessAnalysis}
                 className="space-y-6"
               >
                 <div>
@@ -1467,7 +1931,7 @@ export default function ProfileView() {
                     <button
                       type="button"
                       onClick={addBusinessQuestion}
-                      disabled={planning || businessQuestions.length >= 20}
+                      disabled={aiPlanning || businessQuestions.length >= 20}
                       className="w-fit rounded-lg border border-[var(--border)] px-3 py-2 text-sm font-medium transition hover:border-cyan-500 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       + Add question
@@ -1495,7 +1959,7 @@ export default function ProfileView() {
                           onChange={(event) =>
                             updateBusinessQuestion(index, event.target.value)
                           }
-                          disabled={planning}
+                          disabled={aiPlanning}
                           placeholder={`Question ${index + 1}, e.g. Which region generates the most sales?`}
                           className="min-w-0 flex-1 rounded-lg border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2.5 text-sm outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20"
                         />
@@ -1504,7 +1968,7 @@ export default function ProfileView() {
                           <button
                             type="button"
                             onClick={() => removeBusinessQuestion(index)}
-                            disabled={planning}
+                            disabled={aiPlanning}
                             aria-label={`Remove business question ${index + 1}`}
                             className="rounded-lg border border-[var(--border)] px-3 py-2.5 text-sm transition hover:border-red-500 hover:text-red-600 disabled:opacity-50"
                           >
@@ -1522,7 +1986,7 @@ export default function ProfileView() {
                     className="rounded-xl border border-red-500/40 bg-red-500/5 p-4 text-sm text-red-700 dark:text-red-300"
                   >
                     <p className="font-semibold">
-                      Unable to generate analysis plan
+                      Unable to generate AI business analysis
                     </p>
                     <p className="mt-1">{planningError}</p>
                   </div>
@@ -1530,40 +1994,157 @@ export default function ProfileView() {
 
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <p className="max-w-xl text-xs leading-5 text-[var(--foreground-secondary)]">
-                    Planning is deterministic. Recommendations are not
-                    executed calculations, and your original dataset will
-                    not be modified.
+                    InsightForge AI uses your dataset structure and business context to prepare an AI-assisted analysis brief. Recommendations are guidance; calculations run only when you execute an analysis.
                   </p>
 
-                  <button
-                    type="submit"
-                    disabled={
-                      planning || loading || !businessObjective.trim()
-                    }
-                    className="inline-flex shrink-0 items-center justify-center rounded-lg bg-cyan-500 px-5 py-3 text-sm font-semibold text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {planning
-                      ? "Generating plan..."
-                      : "Generate Analysis Plan"}
-                  </button>
+                  <div className="flex shrink-0 flex-wrap items-center gap-2">
+                    <button
+                      type="submit"
+                      disabled={aiPlanning || loading || !businessObjective.trim()}
+                      className="inline-flex items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-cyan-500/10 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {aiPlanning ? (
+                        <><span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" /> AI is analyzing...</>
+                      ) : (
+                        <><span aria-hidden="true">✦</span> Generate AI Business Analysis</>
+                      )}
+                    </button>
+                    {aiPlanning && (
+                      <button type="button" onClick={handleCancelAIPlanning} className="rounded-lg border border-red-500/50 px-4 py-3 text-sm font-semibold text-red-600 transition hover:bg-red-500/10 dark:text-red-300">
+                        Cancel
+                      </button>
+                    )}
+                  </div>
                 </div>
               </form>
 
-              {planning && (
-                <div
-                  role="status"
-                  className="mt-6 rounded-lg border border-cyan-500/30 bg-cyan-500/5 p-4 text-sm text-[var(--foreground-secondary)]"
-                >
-                  Inspecting dataset columns and generating deterministic
-                  recommendations...
-                </div>
+
+
+              {aiAnalysis && (
+                <section className="mt-8 space-y-5 border-t border-[var(--border)] pt-8">
+
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h4 className="text-xl font-semibold">
+                        AI Business Analyst Results
+                      </h4>
+
+                      <p className="mt-1 text-sm text-[var(--foreground-secondary)]">
+                        AI-generated business intelligence grounded in the columns and records available in your dataset.
+                      </p>
+                    </div>
+
+                    <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1.5 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
+                      ✦ AI Assisted
+                    </span>
+                  </div>
+
+                  <article className="rounded-xl border border-cyan-500/30 bg-cyan-500/5 p-5">
+                    <p className="text-xs font-semibold uppercase tracking-wider text-cyan-700 dark:text-cyan-300">
+                      Refined Business Objective
+                    </p>
+
+                    <p className="mt-3 text-base font-medium leading-7">
+                      {aiAnalysis.refined_objective}
+                    </p>
+                  </article>
+
+                  <div className="grid gap-5 lg:grid-cols-2">
+
+                    <article className="rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] p-5">
+                      <h5 className="font-semibold">
+                        Generated Business Questions
+                      </h5>
+
+                      <ol className="mt-4 space-y-3">
+                        {aiAnalysis.business_questions.map((question, index) => (
+                          <li
+                            key={index}
+                            className="flex gap-3 text-sm leading-6"
+                          >
+                            <span className="font-semibold text-cyan-600 dark:text-cyan-400">
+                              {index + 1}.
+                            </span>
+
+                            <span>{question}</span>
+                          </li>
+                        ))}
+                      </ol>
+                    </article>
+
+                    <article className="rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] p-5">
+                      <h5 className="font-semibold">
+                        AI Reasoning Summary
+                      </h5>
+
+                      <p className="mt-3 text-sm leading-7 text-[var(--foreground-secondary)]">
+                        {aiAnalysis.reasoning_summary}
+                      </p>
+                    </article>
+
+                  </div>
+
+                  <article className="rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] p-5">
+                    <h5 className="font-semibold">
+                      Recommended Business Focus Areas
+                    </h5>
+
+                    <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                      {aiAnalysis.recommended_focus_areas.map((area, index) => (
+                        <div
+                          key={index}
+                          className="rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-4 text-sm font-medium"
+                        >
+                          <span className="mr-2 text-cyan-600 dark:text-cyan-400">
+                            {String(index + 1).padStart(2, "0")}
+                          </span>
+
+                          {area}
+                        </div>
+                      ))}
+                    </div>
+                  </article>
+
+                  {aiAnalysis.clarifying_questions.length > 0 && (
+                    <article className="rounded-xl border border-orange-500/30 bg-orange-500/5 p-5">
+                      <h5 className="font-semibold">
+                        Additional Business Clarifications
+                      </h5>
+
+                      <p className="mt-1 text-xs text-[var(--foreground-secondary)]">
+                        Questions that could improve the accuracy and relevance
+                        of your analysis.
+                      </p>
+
+                      <ul className="mt-4 space-y-3">
+                        {aiAnalysis.clarifying_questions.map((question, index) => (
+                          <li
+                            key={index}
+                            className="flex gap-3 text-sm leading-6"
+                          >
+                            <span className="text-orange-600 dark:text-orange-400">
+                              ?
+                            </span>
+
+                            {question}
+                          </li>
+                        ))}
+                      </ul>
+                    </article>
+                  )}
+                  <div className="mt-5 flex justify-end">
+                    <button type="button" onClick={handleSaveAIPlan} disabled={!aiAnalysis || savingAIPlan || aiPlanSaved} className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-2.5 text-sm font-semibold text-emerald-700 disabled:opacity-50 dark:text-emerald-300">
+                      {savingAIPlan ? "Saving..." : aiPlanSaved ? "✓ AI Plan Saved" : "Save AI Plan"}
+                    </button>
+                  </div>
+                </section>
               )}
 
-              {analysisPlan && (
+              {aiAnalysis && analysisPlan && (
                 <div className="mt-8 border-t border-[var(--border)] pt-8">
                   <div className="mb-6">
                     <h4 className="text-xl font-semibold">
-                      Analysis Plan Results
+                      AI-Recommended Analysis Framework
                     </h4>
 
                     <p className="mt-2 text-sm text-[var(--foreground-secondary)]">
@@ -1575,10 +2156,37 @@ export default function ProfileView() {
                     plan={analysisPlan}
                     onConfigureAnalysis={handleConfigureAnalysis}
                   />
+
                 </div>
               )}
             </section>
 
+            {/* Analysis execution is kept independent from business planning. */}
+            <section
+              id="analytics-execution-panel"
+              className="glass-panel-elevated scroll-mt-28 rounded-2xl border border-[var(--border)] p-5 sm:p-7"
+              aria-label="Execute analysis"
+            >
+              <AnalyticsExecutionPanel
+                profile={profile}
+                requestedAnalysis={requestedAnalysis}
+              />
+
+              <div className="mt-8 border-t border-[var(--border)] pt-6">
+                <div className="flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-center">
+                  <div>
+                    <h4 className="text-lg font-semibold">Saved Business Intelligence Report</h4>
+                    <p className="mt-1 text-sm text-[var(--foreground-secondary)]">Only explicitly saved analyses, AI business plans and interpretations are included.</p>
+                  </div>
+                  <button type="button" onClick={handleDownloadSavedReport} disabled={downloadingReport || !profile} className="inline-flex items-center justify-center rounded-lg bg-cyan-500 px-5 py-3 text-sm font-semibold text-slate-950 disabled:opacity-50">
+                    {downloadingReport ? "Generating PDF..." : "↓ Download PDF Report"}
+                  </button>
+                </div>
+                {reportDownloadError && <p role="alert" className="mt-3 text-sm text-red-600">{reportDownloadError}</p>}
+              </div>
+            </section>
+
+            {/* 6. Column Intelligence */}
             <section id="column-intelligence" className="scroll-mt-28">
               <div className="mb-4">
                 <h3 className="text-xl font-semibold">
@@ -1763,5 +2371,6 @@ export default function ProfileView() {
         </div>
       )}
     </main>
+    </>
   );
 }

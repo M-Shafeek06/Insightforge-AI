@@ -1,4 +1,4 @@
-﻿@import "tailwindcss";
+@import "tailwindcss";
 
 /* =========================================================
    InsightForge AI â€” Premium Glassmorphism Design System
@@ -21,27 +21,27 @@
   --foreground-secondary: #64748b;
   --foreground-muted: #94a3b8;
 
-  --border: rgba(148, 163, 184, 0.24);
-  --border-strong: rgba(100, 116, 139, 0.34);
+  --border: rgba(100, 116, 139, 0.28);
+  --border-strong: rgba(71, 85, 105, 0.42);
 
-  --accent: #0891b2;
-  --accent-strong: #0e7490;
+  --accent: #0284c7;
+  --accent-strong: #0369a1;
   --accent-foreground: #ffffff;
 
-  --accent-soft: rgba(8, 145, 178, 0.10);
-  --accent-glow: rgba(34, 211, 238, 0.16);
+  --accent-soft: rgba(2, 132, 199, 0.14);
+  --accent-glow: rgba(14, 165, 233, 0.20);
 
-  --secondary-accent: #6366f1;
-  --secondary-accent-soft: rgba(99, 102, 241, 0.09);
+  --secondary-accent: #4f46e5;
+  --secondary-accent-soft: rgba(79, 70, 229, 0.13);
 
-  --success: #059669;
-  --success-soft: rgba(16, 185, 129, 0.10);
+  --success: #047857;
+  --success-soft: rgba(5, 150, 105, 0.14);
 
-  --warning: #d97706;
-  --warning-soft: rgba(245, 158, 11, 0.12);
+  --warning: #c2410c;
+  --warning-soft: rgba(234, 88, 12, 0.15);
 
-  --danger: #dc2626;
-  --danger-soft: rgba(239, 68, 68, 0.10);
+  --danger: #b91c1c;
+  --danger-soft: rgba(220, 38, 38, 0.14);
 
   --shadow-sm:
     0 1px 2px rgba(15, 23, 42, 0.035),
@@ -651,15 +651,15 @@ main.app-pattern > div {
   --accent-soft: rgba(8, 126, 164, 0.12);
   --accent-glow: rgba(14, 165, 233, 0.19);
 
-  --secondary-accent: #6366f1;
+  --secondary-accent: #4f46e5;
   --secondary-accent-soft: rgba(99, 102, 241, 0.12);
 
-  --success: #059669;
-  --success-soft: rgba(16, 185, 129, 0.10);
-  --warning: #d97706;
-  --warning-soft: rgba(245, 158, 11, 0.12);
-  --danger: #dc2626;
-  --danger-soft: rgba(239, 68, 68, 0.10);
+  --success: #047857;
+  --success-soft: rgba(5, 150, 105, 0.14);
+  --warning: #c2410c;
+  --warning-soft: rgba(234, 88, 12, 0.15);
+  --danger: #b91c1c;
+  --danger-soft: rgba(220, 38, 38, 0.14);
 
   --shadow-sm:
     0 1px 2px rgba(15, 23, 42, 0.035),
@@ -1763,3 +1763,211 @@ main.app-pattern > div {
 }
 
 /* End INSIGHTFORGE WORKSPACE REFINEMENT V1 */
+
+
+/* =========================================================
+   WORKSPACE LANDING PAGE REFINEMENT — NOV 2026
+   ========================================================= */
+
+/* Give the landing hero a viewport-aware height while keeping it
+   scrollable on short screens and smaller devices. */
+#workspace > .workspace-upload-panel {
+  min-height: clamp(36rem, calc(100svh - 12rem), 50rem);
+  padding: clamp(2rem, 3.4vw, 3.5rem);
+}
+
+/* Keep the navigation anchored and let the section links scroll
+   horizontally rather than compressing or pushing the action buttons. */
+#insightforge-navbar {
+  position: sticky !important;
+  top: 0 !important;
+  z-index: 100;
+  isolation: isolate;
+}
+
+#insightforge-navbar > div:first-child {
+  min-width: 0;
+}
+
+#insightforge-navbar .navbar-links-scroll {
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  scrollbar-width: none;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+#insightforge-navbar .navbar-links-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+#insightforge-navbar .navbar-links-scroll .navbar-link {
+  flex: 0 0 auto;
+  padding-inline: clamp(0.65rem, 1vw, 1rem);
+}
+
+/* The upload panel itself is intentionally not a file-picker target.
+   Only the small icon button opens the native file chooser. */
+#workspace > .workspace-upload-panel .workspace-upload {
+  cursor: default;
+}
+
+#workspace > .workspace-upload-panel .workspace-upload:hover {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  background: color-mix(in srgb, var(--surface-solid) 91%, transparent);
+}
+
+#workspace > .workspace-upload-panel .upload-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 1.5rem;
+  background: transparent;
+  color: var(--accent-strong);
+  cursor: pointer;
+}
+
+#workspace > .workspace-upload-panel .upload-icon-button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+#workspace > .workspace-upload-panel .upload-icon-button:not(:disabled):hover .upload-icon-wrap {
+  transform: translateY(-2px);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 8px var(--accent-soft), 0 16px 32px var(--accent-glow);
+}
+
+#workspace > .workspace-upload-panel .upload-icon-button:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  outline-offset: 7px;
+}
+
+#workspace > .workspace-upload-panel .upload-icon-wrap {
+  cursor: pointer;
+  transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+
+@media (max-height: 760px) and (min-width: 901px) {
+  #workspace > .workspace-upload-panel {
+    min-height: 34rem;
+  }
+}
+
+@media (max-width: 900px) {
+  #workspace > .workspace-upload-panel {
+    min-height: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #workspace > .workspace-upload-panel .upload-icon-wrap {
+    transition: none;
+  }
+}
+
+
+/* =========================================================
+   DATA QUALITY FINDINGS — VISUAL REFINEMENT
+   ========================================================= */
+
+.quality-findings-panel {
+  background:
+    linear-gradient(
+      145deg,
+      color-mix(in srgb, var(--surface-solid) 96%, var(--accent-soft)),
+      var(--surface)
+    );
+}
+
+.quality-issue-card {
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.035);
+}
+
+.quality-issue-card:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-glass);
+  transform: translateY(-1px);
+}
+
+.quality-recommendation {
+  background-image: linear-gradient(
+    110deg,
+    color-mix(in srgb, var(--accent-soft) 82%, transparent),
+    color-mix(in srgb, var(--surface-solid) 55%, transparent)
+  );
+}
+
+.quality-impact-metric {
+  align-self: flex-start;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .quality-issue-card {
+    transition: none;
+  }
+
+  .quality-issue-card:hover {
+    transform: none;
+  }
+}
+
+
+/* =========================================================
+   DATA QUALITY — COMPACT FINDINGS LAYOUT
+   ========================================================= */
+.quality-findings-panel > div:first-child p {
+  max-width: 58rem;
+}
+
+.quality-issue-card {
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.quality-recommendation {
+  align-items: flex-start;
+  background-image: linear-gradient(105deg,
+    color-mix(in srgb, var(--accent-soft) 72%, transparent),
+    color-mix(in srgb, var(--surface-solid) 48%, transparent));
+}
+
+.quality-recommendation p:last-child {
+  min-width: 0;
+}
+
+@media (max-width: 640px) {
+  .quality-impact-metric {
+    align-self: flex-start;
+  }
+}
+
+
+/* =========================================================
+   DATA QUALITY — TWO-COLUMN FINDINGS GRID
+   ========================================================= */
+.quality-findings-grid {
+  align-items: stretch;
+}
+
+.quality-findings-grid > .quality-issue-card {
+  min-width: 0;
+  height: 100%;
+}
+
+.quality-issue-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.quality-issue-card > .quality-recommendation {
+  margin-top: auto;
+}
+
+@media (max-width: 1023px) {
+  .quality-findings-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

@@ -1,4 +1,6 @@
 ﻿from enum import Enum
+from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -7,6 +9,9 @@ class Aggregation(str, Enum):
     SUM = "sum"
     AVERAGE = "average"
     COUNT = "count"
+    MIN = "min"
+    MAX = "max"
+    MEDIAN = "median"
 
 
 class ExecutionOperation(str, Enum):
@@ -65,7 +70,12 @@ class AnalyticsExecutionRequest(BaseModel):
 
     interval: TrendInterval | None = Field(
         default=None,
-        description="The time interval used to aggregate trend values.",
+        description="The time interval used for trend analysis.",
+    )
+
+    version: Literal["original", "cleaned"] = Field(
+        default="original",
+        description="The dataset version to use for analytics execution.",
     )
 
 
@@ -78,6 +88,7 @@ class DescriptiveStatistics(BaseModel):
 
 
 class AnalyticsExecutionResponse(BaseModel):
+    execution_id: UUID | None = None
     dataset_id: str
     operation: ExecutionOperation
     column: str
@@ -89,6 +100,7 @@ class AnalyticsExecutionResponse(BaseModel):
 
 
 class DescriptiveAnalyticsResponse(BaseModel):
+    execution_id: UUID | None = None
     dataset_id: str
     operation: ExecutionOperation
     column: str
@@ -107,6 +119,7 @@ class AnalyticsExecutionGroup(BaseModel):
 
 
 class GroupedAnalyticsExecutionResponse(BaseModel):
+    execution_id: UUID | None = None
     dataset_id: str
     operation: ExecutionOperation
     column: str
@@ -116,6 +129,7 @@ class GroupedAnalyticsExecutionResponse(BaseModel):
 
 
 class SegmentComparisonResponse(BaseModel):
+    execution_id: UUID | None = None
     dataset_id: str
     operation: ExecutionOperation
     column: str
@@ -133,6 +147,7 @@ class TrendDataPoint(BaseModel):
 
 
 class TrendAnalyticsResponse(BaseModel):
+    execution_id: UUID | None = None
     dataset_id: str
     operation: ExecutionOperation
     column: str
@@ -148,6 +163,7 @@ class CorrelationDataPoint(BaseModel):
 
 
 class CorrelationAnalyticsResponse(BaseModel):
+    execution_id: UUID | None = None
     dataset_id: str
     operation: ExecutionOperation
     column: str

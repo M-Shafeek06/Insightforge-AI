@@ -40,3 +40,14 @@ tsconfig.tsbuildinfo
 # Temporary development scripts
 /backend/add_correlation_chart_tests.py
 /frontend/integrate_correlation_chart.py
+
+# Private keys and local TLS key material
+*.key
+localhost-key.pem
+
+# Local dataset metadata and runtime state
+/data/metadata/*
+!/data/metadata/.gitkeep
+
+# Personal documents
+/resume.pdf

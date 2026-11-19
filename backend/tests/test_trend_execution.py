@@ -38,6 +38,9 @@ def test_trend_monthly_sum(tmp_path, monkeypatch):
         },
     )
 
+    print("STATUS:", response.status_code)
+    print("RESPONSE:", response.json())
+
     assert response.status_code == 200
 
     data = response.json()

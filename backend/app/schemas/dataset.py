@@ -21,6 +21,7 @@ class DatasetUploadResponse(BaseModel):
 class DatasetProfileResponse(BaseModel):
     dataset_id: str
     filename: str
+    worksheet_switchable: bool = False
     rows: int = Field(ge=0)
     columns: int = Field(ge=0)
     missing_values: int = Field(ge=0)

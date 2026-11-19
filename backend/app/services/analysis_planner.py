@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -17,144 +18,72 @@ from app.services.quality import assess_dataset_quality
 
 
 def _normalize(value: str) -> str:
-    """Normalize a name for case-insensitive column matching."""
-    return "".join(
-        character
-        for character in value.lower()
-        if character.isalnum()
-    )
+    """Normalize text for exact, case-insensitive comparisons."""
+    return "".join(character for character in value.casefold() if character.isalnum())
 
 
-def _find_column(
-    columns: list[str],
-    candidates: tuple[str, ...],
-) -> str | None:
-    """Find a column by exact normalized name or candidate substring."""
-    normalized_columns = {
-        column: _normalize(column)
-        for column in columns
-    }
+def _tokens(value: str) -> set[str]:
+    """Split snake_case, kebab-case, spaces and camelCase into semantic tokens."""
+    value = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(value))
+    return {token.casefold() for token in re.findall(r"[A-Za-z0-9]+", value)}
 
-    # Prefer exact matches.
+
+def _contains_term(text: str, term: str) -> bool:
+    """Match a phrase as words, not as an arbitrary substring."""
+    text_tokens = _tokens(text)
+    term_tokens = _tokens(term)
+    if not term_tokens:
+        return False
+    if len(term_tokens) == 1:
+        return next(iter(term_tokens)) in text_tokens
+    normalized_text = f" {_normalize(text)} "
+    normalized_term = _normalize(term)
+    return f"{normalized_term}" in normalized_text
+
+
+def _find_column(columns: list[str], candidates: tuple[str, ...]) -> str | None:
+    """Resolve a column by exact alias first, then conservative token matching."""
+    normalized_columns = {column: _normalize(column) for column in columns}
     for candidate in candidates:
-        normalized_candidate = _normalize(candidate)
-
-        for column, normalized_column in normalized_columns.items():
-            if normalized_column == normalized_candidate:
+        target = _normalize(candidate)
+        for column, normalized in normalized_columns.items():
+            if normalized == target:
                 return column
 
-    # Fall back to substring matches.
+    # A candidate must match a complete token/phrase. Prefer the most specific
+    # alias and then the shortest column name to avoid arbitrary broad matches.
+    matches: list[tuple[int, int, str]] = []
     for candidate in candidates:
-        normalized_candidate = _normalize(candidate)
-
-        for column, normalized_column in normalized_columns.items():
-            if normalized_candidate in normalized_column:
-                return column
-
+        candidate_tokens = _tokens(candidate)
+        if not candidate_tokens:
+            continue
+        for column in columns:
+            column_tokens = _tokens(column)
+            if candidate_tokens.issubset(column_tokens):
+                matches.append((len(candidate_tokens), -len(column_tokens), column))
+    if matches:
+        return max(matches)[2]
     return None
 
 
-def _objective_requirements(
-    columns: list[str],
-    objective: str,
-    questions: list[str],
-) -> list[str]:
-    """Identify missing column requirements implied by business intent."""
-    text = " ".join([objective, *questions]).lower()
-
-    requirements: list[
-        tuple[tuple[str, ...], tuple[str, ...]]
-    ] = [
-        (
-            ("product", "products", "item", "items", "sku"),
-            (
-                "product",
-                "product_name",
-                "product_id",
-                "item",
-                "item_name",
-                "item_id",
-                "sku",
-            ),
-        ),
-        (
-            (
-                "customer",
-                "customers",
-                "customer_id",
-                "customer_name",
-                "customer segment",
-                "client",
-                "clients",
-            ),
-            (
-                "customer",
-                "customer_id",
-                "customer_name",
-                "client",
-                "client_id",
-            ),
-        ),
-        (
-            (
-                "region",
-                "regional",
-                "territory",
-                "geography",
-                "geographic",
-            ),
-            (
-                "region",
-                "territory",
-                "state",
-                "country",
-                "city",
-                "geography",
-            ),
-        ),
-        (
-            (
-                "employee",
-                "employees",
-                "sales representative",
-                "salesperson",
-            ),
-            (
-                "employee",
-                "employee_id",
-                "sales_rep",
-                "salesperson",
-                "representative",
-            ),
-        ),
+def _objective_requirements(columns: list[str], objective: str, questions: list[str]) -> list[str]:
+    """Identify explicitly requested business dimensions absent from the data."""
+    text = " ".join([objective, *questions])
+    requirements = [
+        (("product", "products", "item", "items", "sku"), ("product", "product name", "item", "item name", "sku"), "Product"),
+        (("customer", "customers", "customer segment", "client", "clients"), ("customer", "customer id", "customer name", "client", "client id"), "Customer"),
+        (("region", "regional", "territory", "geography", "geographic"), ("region", "territory", "state", "country", "city", "geography"), "Region"),
+        (("employee", "employees", "sales representative", "salesperson"), ("employee", "employee id", "sales rep", "salesperson", "representative"), "Employee"),
     ]
-
     missing: list[str] = []
-
-    for keywords, candidates in requirements:
-        if not any(keyword in text for keyword in keywords):
-            continue
-
-        if _find_column(columns, candidates) is not None:
-            continue
-
-        missing.append(
-            candidates[0].replace("_", " ").title()
-        )
-
+    for triggers, aliases, label in requirements:
+        if any(_contains_term(text, trigger) for trigger in triggers) and _find_column(columns, aliases) is None:
+            missing.append(label)
     return missing
 
 
-def _quality_warnings(
-    path: Path,
-    dataset_id: str,
-) -> list[AnalysisQualityWarning]:
-    """Reuse the existing deterministic quality assessment."""
-    quality_result = assess_dataset_quality(
-        path=path,
-        dataset_id=dataset_id,
-    )
-
+def _quality_warnings(path: Path, dataset_id: str) -> list[AnalysisQualityWarning]:
+    quality_result = assess_dataset_quality(path=path, dataset_id=dataset_id)
     return [
         AnalysisQualityWarning(
             issue_type=issue["issue_type"],
@@ -167,512 +96,180 @@ def _quality_warnings(
     ]
 
 
-def _numeric_columns(df: pd.DataFrame) -> list[str]:
-    """Return usable numeric measures, excluding identifiers and empty columns."""
-    excluded_tokens = (
-        "id",
-        "code",
-        "key",
-        "zip",
-        "postal",
-    )
+def _is_identifier_column(column: str) -> bool:
+    tokens = _tokens(column)
+    identifier_tokens = {"id", "identifier", "code", "key", "zip", "postal", "postcode", "phone", "telephone"}
+    return bool(tokens & identifier_tokens)
 
+
+def _numeric_columns(df: pd.DataFrame) -> list[str]:
+    """Return non-empty numeric measures; exclude identifier fields by token."""
     return [
         str(column)
         for column in df.columns
         if pd.api.types.is_numeric_dtype(df[column])
         and df[column].notna().any()
-        and not any(
-            token in str(column).lower()
-            for token in excluded_tokens
-        )
+        and not _is_identifier_column(str(column))
     ]
 
-def _question_column(
-    columns: list[str],
-    questions: list[str],
-    candidates: list[str],
-) -> str | None:
-    """
-    Select the most specific candidate column referenced in a question.
 
-    Exact normalized matches are preferred. When only substring matches
-    exist, the longest matching column name wins.
-    """
-    normalized_candidates = [
-        (column, _normalize(column))
-        for column in candidates
-        if _normalize(column)
-    ]
-
+def _question_column(columns: list[str], questions: list[str], candidates: list[str]) -> str | None:
+    """Find a column explicitly mentioned in questions, preferring specificity."""
     for question in questions:
-        question_normalized = _normalize(question)
-
-        if not question_normalized:
-            continue
-
-        # Prefer a candidate that matches the complete question.
-        exact_matches = [
-            column
-            for column, normalized in normalized_candidates
-            if normalized == question_normalized
+        q_norm = _normalize(question)
+        exact = [column for column in candidates if _normalize(column) == q_norm]
+        if exact:
+            return max(exact, key=lambda value: len(_tokens(value)))
+        matches = [
+            column for column in candidates
+            if _normalize(column) and _normalize(column) in q_norm
         ]
-
-        if exact_matches:
-            return max(
-                exact_matches,
-                key=lambda column: len(_normalize(column)),
-            )
-
-        # Resolve overlapping column names by preferring the longest.
-        substring_matches = [
-            (column, normalized)
-            for column, normalized in normalized_candidates
-            if normalized in question_normalized
-        ]
-
-        if substring_matches:
-            return max(
-                substring_matches,
-                key=lambda match: len(match[1]),
-            )[0]
-
+        if matches:
+            return max(matches, key=lambda value: (len(_normalize(value)), value))
     return None
 
 
-def _recommended_kpis(
-    df: pd.DataFrame,
-    columns: list[str],
-    objective: str,
-) -> list[RecommendedKPI]:
-    """Recommend KPIs using available numeric columns and objective keywords."""
+def _recommended_kpis(df: pd.DataFrame, columns: list[str], objective: str, questions: list[str] | None = None) -> list[RecommendedKPI]:
+    """Recommend only metrics supported by actual non-empty numeric columns."""
+    text = " ".join([objective, *(questions or [])])
+    numeric = _numeric_columns(df)
     kpis: list[RecommendedKPI] = []
-    objective_lower = objective.lower()
-    numeric_columns = _numeric_columns(df)
 
-    sales_column = _find_column(
-        columns,
-        (
-            "sales",
-            "revenue",
-            "total_amount",
-            "amount",
-            "turnover",
-        ),
-    )
+    def add(name: str, description: str, column: str | None, calculation: str) -> None:
+        if column and column in numeric and all(item.name != name for item in kpis):
+            kpis.append(RecommendedKPI(name=name, description=description, required_columns=[column], calculation=calculation.format(column=column)))
 
-    if sales_column in numeric_columns:
-        kpis.append(
-            RecommendedKPI(
-                name="Total Sales",
-                description="Total value recorded in the sales measure.",
-                required_columns=[sales_column],
-                calculation=f"SUM({sales_column})",
-            )
-        )
+    sales = _find_column(columns, ("sales", "revenue", "total amount", "sales amount", "turnover"))
+    profit = _find_column(columns, ("profit", "net profit", "gross profit"))
+    quantity = _find_column(columns, ("quantity", "units sold", "units", "qty"))
+    orders = _find_column(columns, ("order amount", "order value", "orders"))
 
-        kpis.append(
-            RecommendedKPI(
-                name="Average Sales",
-                description="Average value recorded per row.",
-                required_columns=[sales_column],
-                calculation=f"AVERAGE({sales_column})",
-            )
-        )
+    asks_sales = any(_contains_term(text, term) for term in ("sales", "revenue", "turnover"))
+    asks_profit = any(_contains_term(text, term) for term in ("profit", "margin", "financial"))
+    asks_quantity = any(_contains_term(text, term) for term in ("quantity", "units", "inventory"))
+    asks_orders = any(_contains_term(text, term) for term in ("orders", "order volume", "order value"))
 
-    profit_column = _find_column(
-        columns,
-        ("profit", "net_profit", "gross_profit"),
-    )
+    if sales and (asks_sales or not (asks_profit or asks_quantity or asks_orders)):
+        add("Total Sales", "Total value recorded in the sales measure.", sales, "SUM({column})")
+        add("Average Sales", "Average value recorded per row.", sales, "AVERAGE({column})")
+    if profit and asks_profit:
+        add("Total Profit", "Total value recorded in the profit measure.", profit, "SUM({column})")
+    if quantity and asks_quantity:
+        add("Total Quantity", "Total quantity recorded across all rows.", quantity, "SUM({column})")
+    if orders and asks_orders and orders != sales:
+        add("Total Orders", "Total value recorded in the orders measure.", orders, "SUM({column})")
 
-    if (
-        profit_column in numeric_columns
-        and any(
-            word in objective_lower
-            for word in (
-                "profit",
-                "margin",
-                "financial",
-                "performance",
-            )
-        )
-    ):
-        kpis.append(
-            RecommendedKPI(
-                name="Total Profit",
-                description="Total value recorded in the profit measure.",
-                required_columns=[profit_column],
-                calculation=f"SUM({profit_column})",
-            )
-        )
-
-    quantity_column = _find_column(
-        columns,
-        ("quantity", "units_sold", "units", "qty"),
-    )
-
-    if (
-        quantity_column in numeric_columns
-        and any(
-            word in objective_lower
-            for word in (
-                "sales",
-                "product",
-                "quantity",
-                "inventory",
-            )
-        )
-    ):
-        kpis.append(
-            RecommendedKPI(
-                name="Total Quantity",
-                description="Total quantity recorded across all rows.",
-                required_columns=[quantity_column],
-                calculation=f"SUM({quantity_column})",
-            )
-        )
-
-    if not kpis and numeric_columns:
-        column = numeric_columns[0]
-
-        kpis.append(
-            RecommendedKPI(
-                name=f"Total {column}",
-                description=f"Sum of values in the {column} column.",
-                required_columns=[column],
-                calculation=f"SUM({column})",
-            )
-        )
-
+    if not kpis and numeric:
+        column = _question_column(columns, questions or [], numeric) or numeric[0]
+        add(f"Total {column}", f"Sum of values in the {column} column.", column, "SUM({column})")
     return kpis
 
 
-def _recommended_analyses(
-    df: pd.DataFrame,
-    columns: list[str],
-    business_questions: list[str] | None = None,
-) -> list[RecommendedAnalysis]:
-    """Recommend and prioritize analyses using available columns and questions."""
-    analyses: list[RecommendedAnalysis] = []
+def _recommended_analyses(df: pd.DataFrame, columns: list[str], business_questions: list[str] | None = None, objective: str = "") -> list[RecommendedAnalysis]:
+    """Recommend supported analyses based on intent and available column roles."""
     questions = business_questions or []
+    intent_text = " ".join([objective, *questions])
+    numeric = _numeric_columns(df)
+    time_columns = [str(c) for c in df.columns if _semantic_role(df[c]) == "time"]
+    dimensions = [str(c) for c in df.columns if _semantic_role(df[c]) == "dimension"]
 
-    numeric_columns = _numeric_columns(df)
+    selected_dimension = _question_column(columns, questions, dimensions) or (dimensions[0] if dimensions else None)
+    selected_measure = _question_column(columns, questions, numeric)
+    if selected_measure is None:
+        selected_measure = _find_column(columns, ("sales", "revenue", "profit", "quantity", "amount"))
+    if selected_measure not in numeric:
+        selected_measure = numeric[0] if numeric else None
+    selected_time = _question_column(columns, questions, time_columns) or (time_columns[0] if time_columns else None)
 
-    time_columns = [
-        str(column)
-        for column in df.columns
-        if _semantic_role(df[column]) == "time"
-    ]
+    asks_trend = any(_contains_term(intent_text, term) for term in ("trend", "over time", "monthly", "daily", "weekly", "yearly", "seasonality", "fluctuate", "variation", "temporal"))
+    asks_segment = any(_contains_term(intent_text, term) for term in ("region", "regional", "category", "product", "customer", "segment", "territory", "compare", "highest", "lowest", "top performing", "contribution", "breakdown", "by region", "by category"))
+    asks_correlation = any(_contains_term(intent_text, term) for term in ("relationship", "correlation", "association", "related", "connection"))
 
-    dimension_columns = [
-        str(column)
-        for column in df.columns
-        if _semantic_role(df[column]) == "dimension"
-    ]
+    analyses: list[RecommendedAnalysis] = []
+    if asks_segment and selected_dimension and selected_measure:
+        analyses.append(RecommendedAnalysis(
+            name="Segment Comparison", description="Compare a numeric measure across categories.",
+            analysis_method="Group-by aggregation", operation="segment_comparison",
+            required_columns=[selected_dimension, selected_measure],
+            business_value="Identify the categories contributing most to the measure.",
+        ))
+    if asks_trend and selected_time and selected_measure:
+        analyses.append(RecommendedAnalysis(
+            name="Trend Analysis", description="Examine how a numeric measure changes over time.",
+            analysis_method="Time-based aggregation", operation="trend",
+            required_columns=[selected_time, selected_measure],
+            business_value="Identify temporal patterns, peaks and declines.",
+        ))
+    if asks_correlation and len(numeric) >= 2:
+        first = selected_measure or numeric[0]
+        second = next((column for column in numeric if column != first), None)
+        if second:
+            analyses.append(RecommendedAnalysis(
+                name="Measure Relationship", description="Explore the relationship between two numeric measures.",
+                analysis_method="Correlation analysis", operation="correlation",
+                required_columns=[first, second],
+                business_value="Assess the direction and strength of association between measures.",
+            ))
 
-    # Select the dimension most relevant to the business questions.
-    selected_dimension = (
-        _question_column(
-            columns,
-            questions,
-            dimension_columns,
-        )
-        or (dimension_columns[0] if dimension_columns else None)
-    )
-
-    # Select the numeric measure most relevant to the questions.
-    selected_measure = (
-        _question_column(
-            columns,
-            questions,
-            numeric_columns,
-        )
-        or (
-            _find_column(
-                columns,
-                ("sales", "revenue", "profit", "quantity"),
-            )
-            if numeric_columns
-            else None
-        )
-    )
-
-    if selected_measure not in numeric_columns:
-        selected_measure = (
-            numeric_columns[0] if numeric_columns else None
-        )
-
-    # Select the most relevant time column.
-    selected_time = (
-        _question_column(
-            columns,
-            questions,
-            time_columns,
-        )
-        or (time_columns[0] if time_columns else None)
-    )
-
-    question_text = " ".join(questions).lower()
-
-    # Detect explicit requests for time-based analysis.
-    asks_about_trends = any(
-        keyword in question_text
-        for keyword in (
-            "over time",
-            "trend",
-            "monthly",
-            "daily",
-            "weekly",
-            "yearly",
-            "change over time",
-        )
-    )
-
-    # Detect explicit requests for category or segment comparisons.
-    asks_about_segments = any(
-        keyword in question_text
-        for keyword in (
-            "which region",
-            "which category",
-            "which product",
-            "which customer",
-            "by region",
-            "by category",
-            "by product",
-            "by customer",
-            "most sales",
-            "generates the most",
-            "highest sales",
-            "top-performing",
-        )
-    )
-
-    # Prioritize trend analysis when explicitly requested.
-    if asks_about_trends and numeric_columns and selected_time:
-        analyses.append(
-            RecommendedAnalysis(
-                name="Trend Analysis",
-                description="Examine how numeric measures change over time.",
-                analysis_method="Time-based aggregation",
-                operation="trend",
-                required_columns=[
-                    selected_time,
-                    selected_measure or numeric_columns[0],
-                ],
-                business_value="Identify trends, peaks and declines over time.",
-            )
-        )
-
-    # Recommend segment comparison when supported by the dataset.
-    if (
-        selected_dimension
-        and selected_measure
-        and (
-            asks_about_segments
-            or not asks_about_trends
-        )
-    ):
-        analyses.append(
-            RecommendedAnalysis(
-                name="Segment Comparison",
-                description="Compare a numeric measure across categories.",
-                analysis_method="Group-by aggregation",
-                operation="segment_comparison",
-                required_columns=[
-                    selected_dimension,
-                    selected_measure,
-                ],
-                business_value=(
-                    "Identify the categories contributing most to the measure."
-                ),
-            )
-        )
-
-    # Include a trend analysis when time columns exist and trends were
-    # not explicitly requested.
-    if numeric_columns and time_columns and not asks_about_trends:
-        analyses.append(
-            RecommendedAnalysis(
-                name="Trend Analysis",
-                description="Examine how numeric measures change over time.",
-                analysis_method="Time-based aggregation",
-                operation="trend",
-                required_columns=[
-                    selected_time or time_columns[0],
-                    selected_measure or numeric_columns[0],
-                ],
-                business_value="Identify trends, peaks and declines over time.",
-            )
-        )
-
-    # Recommend relationships between numeric measures.
-    if len(numeric_columns) >= 2:
-        first_measure = selected_measure or numeric_columns[0]
-
-        second_measure = next(
-            (
-                column
-                for column in numeric_columns
-                if column != first_measure
-            ),
-            None,
-        )
-
-        if second_measure:
-            analyses.append(
-                RecommendedAnalysis(
-                    name="Measure Relationship",
-                    description=(
-                        "Explore the relationship between numeric measures."
-                    ),
-                    analysis_method="Correlation analysis",
-                    operation="correlation",
-                    required_columns=[
-                        first_measure,
-                        second_measure,
-                    ],
-                    business_value=(
-                        "Identify potential associations between measures."
-                    ),
-                )
-            )
-
-    # Provide a fallback when no other analysis is possible.
-    if not analyses and numeric_columns:
-        analyses.append(
-            RecommendedAnalysis(
-                name="Descriptive Analysis",
-                description=(
-                    "Summarize the distribution of a numeric measure."
-                ),
-                analysis_method="Descriptive statistics",
-                operation="descriptive",
-                required_columns=[numeric_columns[0]],
-                business_value=(
-                    "Understand the scale and distribution of the measure."
-                ),
-            )
-        )
-
-    # Remove duplicate recommendations while preserving their priority.
-    unique_analyses: list[RecommendedAnalysis] = []
-    seen: set[tuple[str, tuple[str, ...]]] = set()
-
-    for analysis in analyses:
-        key = (
-            analysis.name,
-            tuple(analysis.required_columns),
-        )
-
-        if key in seen:
-            continue
-
-        seen.add(key)
-        unique_analyses.append(analysis)
-
-    return unique_analyses
+    # For broad objectives, provide a small useful baseline rather than
+    # generating every possible method merely because columns exist.
+    if not analyses and selected_measure:
+        if selected_dimension:
+            analyses.append(RecommendedAnalysis(
+                name="Segment Comparison", description="Compare a numeric measure across categories.",
+                analysis_method="Group-by aggregation", operation="segment_comparison",
+                required_columns=[selected_dimension, selected_measure],
+                business_value="Compare performance across available categories.",
+            ))
+        elif selected_time:
+            analyses.append(RecommendedAnalysis(
+                name="Trend Analysis", description="Examine how a numeric measure changes over time.",
+                analysis_method="Time-based aggregation", operation="trend",
+                required_columns=[selected_time, selected_measure],
+                business_value="Identify temporal patterns, peaks and declines.",
+            ))
+        else:
+            analyses.append(RecommendedAnalysis(
+                name="Descriptive Analysis", description="Summarize the distribution of a numeric measure.",
+                analysis_method="Descriptive statistics", operation="descriptive",
+                required_columns=[selected_measure],
+                business_value="Understand the scale and distribution of the measure.",
+            ))
+    return analyses
 
 
-def plan_dataset_analysis(
-    path: Path,
-    dataset_id: str,
-    business_objective: str,
-    business_questions: list[str] | None = None,
-) -> dict[str, Any]:
-    """Create a deterministic analysis plan for an uploaded dataset."""
+def plan_dataset_analysis(path: Path, dataset_id: str, business_objective: str, business_questions: list[str] | None = None) -> dict[str, Any]:
+    """Create a deterministic, dataset-grounded analysis plan."""
     df = load_tabular_file(path)
     columns = [str(column) for column in df.columns]
-
     objective = business_objective.strip()
     questions = business_questions or []
 
-    recommended_kpis = _recommended_kpis(
-        df=df,
-        columns=columns,
-        objective=objective,
-    )
-
-    recommended_analyses = _recommended_analyses(
-        df=df,
-        columns=columns,
-        business_questions=questions,
-    )
-
-    required_columns = {
-        column
-        for kpi in recommended_kpis
-        for column in kpi.required_columns
-    }
-
-    required_columns.update(
-        column
-        for analysis in recommended_analyses
-        for column in analysis.required_columns
-    )
-
-    missing_recommended_columns = sorted(
-        column
-        for column in required_columns
-        if column not in columns
-    )
-
-    objective_missing_columns = _objective_requirements(
-        columns=columns,
-        objective=objective,
-        questions=questions,
-    )
-
-    missing_required_columns = sorted(
-        set(missing_recommended_columns)
-        | set(objective_missing_columns)
-    )
+    recommended_kpis = _recommended_kpis(df, columns, objective, questions)
+    recommended_analyses = _recommended_analyses(df, columns, questions, objective)
+    objective_missing = _objective_requirements(columns, objective, questions)
 
     if not columns or len(df) == 0:
-        feasibility_status = "not_feasible"
-        feasibility_reason = (
-            "The dataset contains no usable rows or columns."
-        )
-
+        status, reason = "not_feasible", "The dataset contains no usable rows or columns."
+    elif not _numeric_columns(df):
+        status, reason = "not_feasible", "No non-empty numeric measure is available for the supported analytical methods."
+    elif objective_missing:
+        status = "partially_feasible"
+        reason = "The dataset supports some analysis, but the requested objective may require additional dimension(s): " + ", ".join(objective_missing) + "."
     elif not recommended_kpis and not recommended_analyses:
-        feasibility_status = "not_feasible"
-        feasibility_reason = (
-            "No suitable numeric measures were identified "
-            "for the current analysis rules."
-        )
-
-    elif objective_missing_columns:
-        feasibility_status = "partially_feasible"
-
-        missing_description = ", ".join(
-            objective_missing_columns
-        )
-
-        feasibility_reason = (
-            "The dataset supports some general analysis, but "
-            "the requested business objective requires "
-            f"additional column(s): {missing_description}."
-        )
-
+        status, reason = "partially_feasible", "Some dataset fields are available, but the current planner could not identify a supported analysis matching the request."
     else:
-        feasibility_status = "feasible"
-        feasibility_reason = (
-            "The dataset contains columns suitable for the "
-            "requested objective and recommended analyses."
-        )
+        status, reason = "feasible", "The dataset contains fields that support the recommended analyses. Recommendations are limited to the available columns and detected data types."
 
-    quality_warnings = _quality_warnings(
-        path=path,
-        dataset_id=dataset_id,
-    )
-
+    quality_warnings = _quality_warnings(path=path, dataset_id=dataset_id)
     return AnalysisPlanResponse(
         dataset_id=dataset_id,
         business_objective=objective,
-        feasibility_status=feasibility_status,
-        feasibility_reason=feasibility_reason,
+        feasibility_status=status,
+        feasibility_reason=reason,
         recommended_kpis=recommended_kpis,
         recommended_analyses=recommended_analyses,
         available_columns=columns,
-        missing_required_columns=missing_required_columns,
+        missing_required_columns=objective_missing,
         quality_warnings=quality_warnings,
     ).model_dump()

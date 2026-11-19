@@ -1,8 +1,11 @@
+import pandas as pd
 from io import BytesIO
+from uuid import UUID
 
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.models import Dataset, DatasetVersion
 
 client = TestClient(app)
 
@@ -14,7 +17,7 @@ def test_health():
     assert response.json() == {"status": "ok"}
 
 
-def test_csv_upload_and_profile(tmp_path, monkeypatch):
+def test_csv_upload_and_profile(tmp_path, monkeypatch, db_session):
     from app.services import settings as settings_module
 
     upload_dir = tmp_path / "raw"
@@ -48,6 +51,21 @@ def test_csv_upload_and_profile(tmp_path, monkeypatch):
 
     dataset_id = response.json()["dataset_id"]
 
+    # Verify PostgreSQL dataset record
+    dataset = db_session.get(Dataset, UUID(dataset_id))
+
+    assert dataset is not None
+    assert dataset.filename == "sales.csv"
+    assert dataset.storage_location == "raw"
+
+    # Verify original dataset version
+    version = db_session.get(DatasetVersion, UUID(dataset_id))
+
+    assert version is not None
+    assert version.version_number == 0
+    assert version.version_type == "original"
+
+    # Verify existing profiling functionality
     profile = client.get(
         f"/api/datasets/{dataset_id}/profile"
     )
@@ -750,3 +768,402 @@ def test_analysis_plan_accepts_partially_populated_numeric_measures(
         "Sales" in analysis["required_columns"]
         for analysis in data["recommended_analyses"]
     )
+
+def test_cleaning_preview_success(tmp_path, monkeypatch):
+    from app.services import settings as settings_module
+
+    upload_dir = tmp_path / "raw"
+    upload_dir.mkdir()
+
+    dataset_id = "550e8400-e29b-41d4-a716-446655440000"
+
+    dataset_file = upload_dir / f"{dataset_id}.csv"
+    dataset_file.write_text(
+        "Region,Sales\n"
+        " South ,100\n"
+        "North,\n"
+        "South,300\n",
+        encoding="utf-8",
+    )
+
+    original_content = dataset_file.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(
+        settings_module.settings,
+        "upload_dir",
+        upload_dir,
+    )
+
+    response = client.post(
+        f"/api/datasets/{dataset_id}/cleaning-preview",
+        json={
+            "operations": [
+                {
+                    "type": "trim_whitespace",
+                    "column": "Region",
+                },
+                {
+                    "type": "fill_missing",
+                    "column": "Sales",
+                    "strategy": "mean",
+                },
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["dataset_id"] == dataset_id
+    assert data["status"] == "preview_generated"
+    assert data["before"]["missing_values"] == 1
+    assert data["after"]["missing_values"] == 0
+
+    assert dataset_file.read_text(encoding="utf-8") == original_content
+
+
+def test_cleaning_preview_invalid_dataset_id():
+    response = client.post(
+        "/api/datasets/invalid-id/cleaning-preview",
+        json={
+            "operations": [
+                {
+                    "type": "drop_duplicates",
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Invalid dataset identifier."
+
+
+def test_cleaning_preview_missing_dataset(tmp_path, monkeypatch):
+    from app.services import settings as settings_module
+
+    upload_dir = tmp_path / "raw"
+    upload_dir.mkdir()
+
+    monkeypatch.setattr(
+        settings_module.settings,
+        "upload_dir",
+        upload_dir,
+    )
+
+    dataset_id = "550e8400-e29b-41d4-a716-446655440000"
+
+    response = client.post(
+        f"/api/datasets/{dataset_id}/cleaning-preview",
+        json={
+            "operations": [
+                {
+                    "type": "drop_duplicates",
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Dataset not found."
+
+
+def test_cleaning_preview_rejects_invalid_operation(tmp_path, monkeypatch):
+    from app.services import settings as settings_module
+
+    upload_dir = tmp_path / "raw"
+    upload_dir.mkdir()
+
+    dataset_id = "550e8400-e29b-41d4-a716-446655440000"
+
+    (upload_dir / f"{dataset_id}.csv").write_text(
+        "Region,Sales\nSouth,100\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        settings_module.settings,
+        "upload_dir",
+        upload_dir,
+    )
+
+    response = client.post(
+        f"/api/datasets/{dataset_id}/cleaning-preview",
+        json={
+            "operations": [
+                {
+                    "type": "invalid_operation",
+                    "column": "Sales",
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 422
+
+# --------------------------------------------------
+# CLEANING API INTEGRATION TESTS
+# --------------------------------------------------
+
+def setup_cleaning_api_environment(tmp_path, monkeypatch):
+    from uuid import uuid4
+
+    from app.services import settings as settings_module
+
+    upload_dir = tmp_path / "raw"
+    processed_dir = tmp_path / "processed"
+
+    upload_dir.mkdir()
+    processed_dir.mkdir()
+
+    monkeypatch.setattr(
+        settings_module.settings,
+        "upload_dir",
+        upload_dir,
+    )
+
+    monkeypatch.setattr(
+        settings_module.settings,
+        "processed_dir",
+        processed_dir,
+    )
+
+    dataset_id = str(uuid4())
+
+    dataset_file = upload_dir / f"{dataset_id}.csv"
+
+    dataset_file.write_text(
+        "Product,Sales\n"
+        "Laptop,1000\n"
+        "Laptop,1000\n"
+        "Phone,500\n",
+        encoding="utf-8",
+    )
+
+    return {
+        "dataset_id": dataset_id,
+        "dataset_file": dataset_file,
+        "processed_dir": processed_dir,
+    }
+
+
+def generate_api_cleaning_preview(dataset_id):
+
+    return client.post(
+        f"/api/datasets/{dataset_id}/cleaning-preview",
+        json={
+            "operations": [
+                {
+                    "type": "drop_duplicates",
+                }
+            ]
+        },
+    )
+
+
+def test_cleaning_api_complete_lifecycle(tmp_path, monkeypatch):
+
+    import json
+
+    environment = setup_cleaning_api_environment(
+        tmp_path,
+        monkeypatch,
+    )
+
+    dataset_id = environment["dataset_id"]
+
+    # 1. Read and preserve the original dataset
+    original_df = pd.read_csv(
+        environment["dataset_file"]
+    )
+
+    original_snapshot = original_df.copy(deep=True)
+
+    # 2. Generate cleaning preview
+    preview_response = generate_api_cleaning_preview(
+        dataset_id
+    )
+
+    assert preview_response.status_code == 200
+
+    preview_data = preview_response.json()
+
+    plan_id = preview_data["plan_id"]
+
+    assert preview_data["approval_status"] == "pending"
+
+    # 3. Approve cleaning plan
+    approval_response = client.post(
+        f"/api/datasets/{dataset_id}/cleaning-plans/{plan_id}/approve",
+        json={"approved": True},
+    )
+
+    assert approval_response.status_code == 200
+    assert approval_response.json()["status"] == "approved"
+
+    # 4. Execute approved cleaning plan
+    execution_response = client.post(
+        f"/api/datasets/{dataset_id}/cleaning-plans/{plan_id}/execute"
+    )
+
+    assert execution_response.status_code == 200
+
+    execution_data = execution_response.json()
+
+    assert execution_data["status"] == "executed"
+
+    # 5. Validate cleaned dataset
+    cleaned_file = (
+        environment["processed_dir"]
+        / execution_data["output_filename"]
+    )
+
+    assert cleaned_file.is_file()
+
+    cleaned_df = pd.read_csv(cleaned_file)
+
+    expected_df = original_snapshot.drop_duplicates()
+
+    pd.testing.assert_frame_equal(
+        cleaned_df.reset_index(drop=True),
+        expected_df.reset_index(drop=True),
+    )
+
+    assert execution_data["original_rows"] == len(original_snapshot)
+    assert execution_data["cleaned_rows"] == len(expected_df)
+
+    # 6. Verify original dataset remains unchanged
+    current_original_df = pd.read_csv(
+        environment["dataset_file"]
+    )
+
+    pd.testing.assert_frame_equal(
+        current_original_df,
+        original_snapshot,
+    )
+
+    # 7. Verify execution audit manifest
+    plan_file = (
+        environment["processed_dir"]
+        / "cleaning_plans"
+        / f"{plan_id}.json"
+    )
+
+    assert plan_file.is_file()
+
+    saved_plan = json.loads(
+        plan_file.read_text(encoding="utf-8")
+    )
+
+    assert saved_plan["status"] == "executed"
+
+    assert saved_plan["cleaned_dataset_id"] == (
+        execution_data["cleaned_dataset_id"]
+    )
+
+    assert saved_plan["execution_results"]
+    assert saved_plan["output_metrics"]
+
+def test_cleaning_api_rejects_unapproved_execution(
+    tmp_path,
+    monkeypatch,
+):
+
+    environment = setup_cleaning_api_environment(
+        tmp_path,
+        monkeypatch,
+    )
+
+    dataset_id = environment["dataset_id"]
+
+    preview_response = generate_api_cleaning_preview(
+        dataset_id
+    )
+
+    plan_id = preview_response.json()["plan_id"]
+
+    response = client.post(
+        f"/api/datasets/{dataset_id}/cleaning-plans/{plan_id}/execute"
+    )
+
+    assert response.status_code == 409
+
+
+def test_cleaning_api_rejects_repeated_execution(
+    tmp_path,
+    monkeypatch,
+):
+
+    environment = setup_cleaning_api_environment(
+        tmp_path,
+        monkeypatch,
+    )
+
+    dataset_id = environment["dataset_id"]
+
+    preview_response = generate_api_cleaning_preview(
+        dataset_id
+    )
+
+    plan_id = preview_response.json()["plan_id"]
+
+    approval_response = client.post(
+        f"/api/datasets/{dataset_id}/cleaning-plans/{plan_id}/approve",
+        json={
+            "approved": True,
+        },
+    )
+
+    assert approval_response.status_code == 200
+
+    first_execution = client.post(
+        f"/api/datasets/{dataset_id}/cleaning-plans/{plan_id}/execute"
+    )
+
+    assert first_execution.status_code == 200
+
+    second_execution = client.post(
+        f"/api/datasets/{dataset_id}/cleaning-plans/{plan_id}/execute"
+    )
+
+    assert second_execution.status_code == 409
+
+
+def test_cleaning_api_rejects_modified_original_dataset(
+    tmp_path,
+    monkeypatch,
+):
+
+    environment = setup_cleaning_api_environment(
+        tmp_path,
+        monkeypatch,
+    )
+
+    dataset_id = environment["dataset_id"]
+
+    preview_response = generate_api_cleaning_preview(
+        dataset_id
+    )
+
+    plan_id = preview_response.json()["plan_id"]
+
+    approval_response = client.post(
+        f"/api/datasets/{dataset_id}/cleaning-plans/{plan_id}/approve",
+        json={
+            "approved": True,
+        },
+    )
+
+    assert approval_response.status_code == 200
+
+    # Modify original dataset after approval
+    environment["dataset_file"].write_text(
+        "Product,Sales\nTablet,800\n",
+        encoding="utf-8",
+    )
+
+    execution_response = client.post(
+        f"/api/datasets/{dataset_id}/cleaning-plans/{plan_id}/execute"
+    )
+
+    assert execution_response.status_code == 409

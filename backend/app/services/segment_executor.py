@@ -1,22 +1,38 @@
-from __future__ import annotations
-
-import math
 from pathlib import Path
+import math
 
-import pandas as pd
+import duckdb
 
-from app.data.loaders.tabular import load_tabular_file
+from app.data.duckdb_engine import (
+    DuckDBEngineError,
+    connect_read_only,
+)
+
 from app.schemas.execution import (
-    Aggregation,
     AnalyticsExecutionGroup,
     AnalyticsExecutionRequest,
-    ExecutionOperation,
     SegmentComparisonResponse,
 )
-from app.services.analytics_executor import (
-    AnalyticsExecutionError,
-    _stable_mean,
-)
+
+from app.services.analytics_executor import AnalyticsExecutionError
+
+
+def _quote_identifier(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _normalize_group_value(value):
+
+    if value is None:
+        return None
+
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+
+    if hasattr(value, "item"):
+        return value.item()
+
+    return value
 
 
 def execute_segment_comparison(
@@ -24,163 +40,261 @@ def execute_segment_comparison(
     dataset_id: str,
     request: AnalyticsExecutionRequest,
 ) -> SegmentComparisonResponse:
-    """Compare a selected measure across distinct segment values."""
 
-    if request.group_by is None:
-        raise AnalyticsExecutionError(
-            "Segment comparison requires a segment column."
-        )
-
-    if request.aggregation is None:
-        raise AnalyticsExecutionError(
-            "Segment comparison requires an aggregation."
-        )
+    connection = None
 
     try:
-        df = load_tabular_file(path)
-    except (OSError, ValueError, ImportError) as exc:
+        connection = connect_read_only(path)
+
+        group_by = request.group_by
+        column = request.column
+        aggregation_enum = request.aggregation
+
+        if not group_by:
+            raise AnalyticsExecutionError(
+                "A grouping column must be selected."
+            )
+
+        if aggregation_enum is None:
+            raise AnalyticsExecutionError(
+                "An aggregation must be selected."
+            )
+
+        aggregation = aggregation_enum.value.upper()
+
+        if aggregation not in {
+            "COUNT", "SUM", "AVERAGE", "MIN", "MAX", "MEDIAN"
+        }:
+            raise AnalyticsExecutionError(
+                "Unsupported aggregation. Use COUNT, SUM, AVERAGE, MIN, MAX, or MEDIAN."
+            )
+
+        if aggregation != "COUNT" and not column:
+            raise AnalyticsExecutionError(
+                "A numeric measure column is required for this aggregation."
+            )
+
+        if column and group_by == column:
+            raise AnalyticsExecutionError(
+                "The grouping column and measure column must be different."
+            )
+
+        schema = connection.execute(
+            "DESCRIBE SELECT * FROM dataset"
+        ).fetchall()
+
+        column_names = [item[0] for item in schema]
+
+        if len(column_names) != len(set(column_names)):
+            raise AnalyticsExecutionError(
+                "Dataset contains duplicate column names."
+            )
+
+        if group_by not in column_names:
+            raise AnalyticsExecutionError(
+                f"Grouping column '{group_by}' does not exist."
+            )
+
+        if column and column not in column_names:
+            raise AnalyticsExecutionError(
+                f"Measure column '{column}' does not exist."
+            )
+
+        quoted_group = _quote_identifier(group_by)
+        quoted_measure = (
+            _quote_identifier(column) if column else None
+        )
+
+        row_count = connection.execute(
+            "SELECT COUNT(*) FROM dataset"
+        ).fetchone()[0]
+
+        if row_count == 0:
+            raise AnalyticsExecutionError(
+                "Cannot compare segments in an empty dataset."
+            )
+
+        if aggregation == "COUNT":
+
+            value_expression = (
+                f"COUNT({quoted_measure})"
+                if quoted_measure else "COUNT(*)"
+            )
+
+            valid_expression = value_expression
+
+            null_expression = (
+                f"COUNT(*) - COUNT({quoted_measure})"
+                if quoted_measure else "0"
+            )
+
+            query = f"""
+                SELECT
+                    {quoted_group} AS group_value,
+                    {value_expression} AS metric,
+                    COUNT(*) AS row_count,
+                    {valid_expression} AS valid_value_count,
+                    {null_expression} AS null_count
+                FROM dataset
+                GROUP BY {quoted_group}
+            """
+
+        else:
+
+            converted = (
+                f"TRY_CAST({quoted_measure} AS DOUBLE)"
+            )
+
+            invalid_count = connection.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM dataset
+                WHERE {quoted_measure} IS NOT NULL
+                  AND {converted} IS NULL
+                """
+            ).fetchone()[0]
+
+            if invalid_count:
+                raise AnalyticsExecutionError(
+                    f"Measure column '{column}' contains non-numeric values."
+                )
+
+            non_finite_count = connection.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM dataset
+                WHERE {converted} IS NOT NULL
+                  AND NOT ISFINITE({converted})
+                """
+            ).fetchone()[0]
+
+            if non_finite_count:
+                raise AnalyticsExecutionError(
+                    f"Measure column '{column}' contains non-finite values."
+                )
+
+            if aggregation == "SUM":
+
+                query = f"""
+                    SELECT
+                        {quoted_group} AS group_value,
+                        FSUM({converted}) AS metric,
+                        COUNT(*) AS row_count,
+                        COUNT({converted}) AS valid_value_count,
+                        COUNT(*) - COUNT({converted}) AS null_count
+                    FROM dataset
+                    GROUP BY {quoted_group}
+                """
+
+            elif aggregation in {"MIN", "MAX", "MEDIAN"}:
+                aggregate_function = {
+                    "MIN": "MIN",
+                    "MAX": "MAX",
+                    "MEDIAN": "MEDIAN",
+                }[aggregation]
+
+                query = f"""
+                    SELECT
+                        {quoted_group} AS group_value,
+                        {aggregate_function}({converted}) AS metric,
+                        COUNT(*) AS row_count,
+                        COUNT({converted}) AS valid_value_count,
+                        COUNT(*) - COUNT({converted}) AS null_count
+                    FROM dataset
+                    GROUP BY {quoted_group}
+                """
+
+            else:
+
+                query = f"""
+                    WITH scaled AS (
+                        SELECT
+                            {quoted_group} AS group_value,
+                            {converted} AS measure_value,
+                            MAX(ABS({converted}))
+                                OVER (
+                                    PARTITION BY {quoted_group}
+                                ) AS scale
+                        FROM dataset
+                    )
+
+                    SELECT
+                        group_value,
+                        AVG(
+                            measure_value / NULLIF(scale, 0)
+                        ) * MAX(scale) AS metric,
+                        COUNT(*) AS row_count,
+                        COUNT(measure_value) AS valid_value_count,
+                        COUNT(*) - COUNT(measure_value) AS null_count
+                    FROM scaled
+                    GROUP BY group_value
+                """
+
+        results = connection.execute(query).fetchall()
+
+        results.sort(
+            key=lambda item: (
+                item[0] is None,
+                str(_normalize_group_value(item[0])).casefold()
+                if item[0] is not None else "",
+                type(item[0]).__name__,
+            )
+        )
+
+        segments = []
+
+        for (
+            group_value,
+            metric,
+            segment_rows,
+            valid_count,
+            null_count,
+        ) in results:
+
+            if metric is not None:
+                metric = float(metric)
+
+                if not math.isfinite(metric):
+                    raise AnalyticsExecutionError(
+                        "The aggregation produced a non-finite result."
+                    )
+
+            segments.append(
+                AnalyticsExecutionGroup(
+                    group=_normalize_group_value(group_value),
+                    value=metric,
+                    row_count=int(segment_rows),
+                    valid_value_count=int(valid_count),
+                    null_count=int(null_count),
+                )
+            )
+
+        return SegmentComparisonResponse(
+            dataset_id=dataset_id,
+            operation=request.operation,
+            column=column,
+            aggregation=aggregation_enum,
+            segment_by=group_by,
+            segments=segments,
+        )
+
+    except (
+        AnalyticsExecutionError,
+        FileNotFoundError,
+        DuckDBEngineError,
+    ):
+        raise
+
+    except duckdb.Error as exc:
         raise AnalyticsExecutionError(
-            "Unable to read the dataset."
+            "DuckDB failed to execute segment comparison."
         ) from exc
 
-    if df.empty:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise AnalyticsExecutionError(
-            "Cannot execute analytics on an empty dataset."
-        )
+            "Unable to process segment comparison results."
+        ) from exc
 
-    if not df.columns.is_unique:
-        raise AnalyticsExecutionError(
-            "The dataset contains duplicate column names."
-        )
-
-    if request.column not in df.columns:
-        raise AnalyticsExecutionError(
-            f"Column '{request.column}' does not exist in the dataset."
-        )
-
-    if request.group_by not in df.columns:
-        raise AnalyticsExecutionError(
-            f"Segment column '{request.group_by}' "
-            "does not exist in the dataset."
-        )
-
-    if request.column == request.group_by:
-        raise AnalyticsExecutionError(
-            "The measure column and segment column must be different."
-        )
-
-    values = df[request.column]
-    segment_values = df[request.group_by]
-
-    if request.aggregation != Aggregation.COUNT:
-        if not pd.api.types.is_numeric_dtype(values):
-            raise AnalyticsExecutionError(
-                f"Aggregation '{request.aggregation.value}' "
-                "requires a numeric column."
-            )
-
-        valid_values = values.dropna()
-
-        if not all(
-            math.isfinite(float(value))
-            for value in valid_values
-        ):
-            raise AnalyticsExecutionError(
-                "The selected column contains non-finite numeric values."
-            )
-
-    if pd.api.types.is_numeric_dtype(segment_values):
-        valid_segments = segment_values.dropna()
-
-        if not all(
-            math.isfinite(float(value))
-            for value in valid_segments
-        ):
-            raise AnalyticsExecutionError(
-                "The segment column contains non-finite numeric values."
-            )
-
-    grouped = df.groupby(
-        request.group_by,
-        dropna=False,
-        sort=False,
-        observed=True,
-    )
-
-    segments: list[AnalyticsExecutionGroup] = []
-
-    for segment_value, group_df in grouped:
-        group_values = group_df[request.column]
-        valid_values = group_values.dropna()
-
-        valid_count = int(group_values.notna().sum())
-        null_count = int(group_values.isna().sum())
-
-        if request.aggregation == Aggregation.COUNT:
-            result = float(valid_count)
-
-        elif valid_values.empty:
-            result = None
-
-        elif request.aggregation == Aggregation.SUM:
-            result = float(
-                math.fsum(float(value) for value in valid_values)
-            )
-
-        elif request.aggregation == Aggregation.AVERAGE:
-            result = _stable_mean(valid_values)
-
-        else:
-            raise AnalyticsExecutionError(
-                "The requested aggregation is not supported."
-            )
-
-        if result is not None and not math.isfinite(result):
-            raise AnalyticsExecutionError(
-                "The aggregation produced a non-finite result."
-            )
-
-        if pd.isna(segment_value):
-            normalized_segment = None
-        elif isinstance(segment_value, pd.Timestamp):
-            normalized_segment = segment_value.isoformat()
-        elif hasattr(segment_value, "item"):
-            normalized_segment = segment_value.item()
-        else:
-            normalized_segment = segment_value
-
-        if not (
-            normalized_segment is None
-            or isinstance(
-                normalized_segment,
-                (str, int, float, bool),
-            )
-        ):
-            normalized_segment = str(normalized_segment)
-
-        segments.append(
-            AnalyticsExecutionGroup(
-                group=normalized_segment,
-                value=result,
-                row_count=len(group_df),
-                valid_value_count=valid_count,
-                null_count=null_count,
-            )
-        )
-
-    segments.sort(
-        key=lambda item: (
-            item.group is None,
-            str(item.group).casefold(),
-            type(item.group).__name__,
-        )
-    )
-
-    return SegmentComparisonResponse(
-        dataset_id=dataset_id,
-        operation=ExecutionOperation.SEGMENT_COMPARISON,
-        column=request.column,
-        aggregation=request.aggregation,
-        segment_by=request.group_by,
-        segments=segments,
-    )
+    finally:
+        if connection is not None:
+            connection.close()
