@@ -15,15 +15,15 @@
 
 ## Overview
 
-**InsightForge AI** is a web-based Business Analytics and Decision Intelligence platform designed to help users explore datasets, evaluate data quality, perform analytical operations, and interpret results in a business context.
+**InsightForge AI** is a web-based Business Analytics and Decision Intelligence platform designed to help users explore datasets, assess data quality, perform analytical operations, and interpret results in a business context.
 
 The platform brings together dataset profiling, data-quality assessment, business analysis planning, data cleaning, analytical execution, interactive visualizations, and AI-assisted interpretation within a unified application.
 
-Rather than treating data analysis as an isolated technical task, InsightForge AI provides a structured workflow that connects data understanding with business-oriented analysis.
+It provides a structured workflow that connects data understanding with business-oriented analysis.
 
-**Core Workflow:**
+### Core Workflow
 
-`Understand → Clean → Analyze → Visualize → Explain → Decide`
+**Understand → Clean → Analyze → Visualize → Explain → Decide**
 
 **Project Status:** Publicly deployed MVP.
 
@@ -31,12 +31,32 @@ Rather than treating data analysis as an isolated technical task, InsightForge A
 
 ## Live Application
 
-| Component | URL |
+| Component | Link |
 |---|---|
 | Web Application | [InsightForge AI](https://insightforge-ai-chi.vercel.app/) |
 | Backend API | [Render API](https://insightforge-ai-gskd.onrender.com) |
 | API Documentation | [Swagger UI](https://insightforge-ai-gskd.onrender.com/docs) |
 | Source Code | [GitHub Repository](https://github.com/M-Shafeek06/Insightforge-AI) |
+
+---
+
+## Project Workflow
+
+The following diagram illustrates the overall workflow of InsightForge AI.
+
+<p align="center">
+  <img src="docs/architecture/InsightForge%20AI%20Project%20Workflow%202.png" alt="InsightForge AI Project Workflow" width="100%">
+</p>
+
+## System Architecture
+
+InsightForge AI follows a separated frontend and backend architecture.
+
+<p align="center">
+  <img src="docs/architecture/InsightForge%20AI%20Workflow%20Architecture.png" alt="InsightForge AI System Architecture" width="100%">
+</p>
+
+The frontend communicates with the backend through API requests. Dataset processing, quality assessment, cleaning, analytical execution, persistence, and AI-assisted interpretation are handled through their respective application components.
 
 ---
 
@@ -101,14 +121,15 @@ Helps translate business objectives into structured analytical approaches.
 - Suggested KPIs.
 - Recommended analytical operations.
 - Data-quality considerations.
+- Additional business clarification questions.
 
-**Important:** Planner recommendations are suggestions. They are distinct from the analytical operations that users subsequently execute.
+Planner recommendations are suggestions. They are separate from the analytical operations users subsequently execute.
 
 ### 6. Analytical Execution
 
 Supports multiple analytical operations through the backend.
 
-| Operation | Description |
+| Analysis Type | Description |
 |---|---|
 | KPI & Aggregation Analysis | Calculate measures with optional grouping. |
 | Descriptive Statistics | Summarize numerical variables. |
@@ -130,15 +151,34 @@ Supported visualization categories include:
 - Correlation visualizations.
 - Analytical result summaries.
 
-### 8. AI-Assisted Business Interpretation
+### 8. Business Insights & Decision Support
+
+Provides deterministic observations based on executed analytical results.
+
+Depending on the analysis, this can include:
+
+- Findings supported by calculated results.
+- Interpretations within the limits of the analysis.
+- Data limitations.
+- Questions for further investigation.
+
+These observations are intended to support analysis, not establish causation or independently explain underlying business drivers.
+
+### 9. AI-Assisted Business Interpretation
 
 Provides AI-assisted explanations based on analytical results and dataset context.
 
-The objective is to make analytical outputs easier to understand and connect them with potential business implications.
+The interpretation workflow can produce:
+
+- Executive summaries.
+- Key findings.
+- Business implications.
+- Risks and limitations.
+- Actionable recommendations.
 
 AI-generated interpretations should be reviewed against the underlying data and business context. They are not guaranteed to be factually correct or to predict business outcomes.
 
-### 9. Analytics History & Reports
+### 10. Analytics History & PDF Reports
 
 Supports saving analytical results and generating downloadable reports.
 
@@ -148,6 +188,12 @@ Supports saving analytical results and generating downloadable reports.
 - Generate downloadable PDF reports.
 
 **Report inclusion rule:** Only analyses explicitly saved by the user are included in the generated report. Executed but unsaved analyses are excluded.
+
+### Sample Analytics Report
+
+A sample PDF report generated by the application is available in the repository:
+
+[View Sample Analytics Report](InsightForge_Analytics_Report_Sample.pdf)
 
 ---
 
@@ -189,7 +235,7 @@ Supports saving analytical results and generating downloadable reports.
 
 These integrations support AI-assisted application functionality. AI-generated outputs are separate from deterministic analytical calculations.
 
-### Deployment
+### Deployment & Infrastructure
 
 | Platform | Responsibility |
 |---|---|
@@ -197,59 +243,6 @@ These integrations support AI-assisted application functionality. AI-generated o
 | Render | Backend API hosting |
 | Neon | Managed PostgreSQL database |
 | GitHub | Source-code repository and version control |
-
----
-
-## Application Architecture
-
-InsightForge AI follows a separated frontend and backend architecture.
-
-```text
-                 USER
-                   |
-                   v
-             NEXT.JS FRONTEND
-                   |
-                   v
-         NEXT.JS API ROUTE HANDLER
-                   |
-                   v
-             FASTAPI BACKEND
-                   |
-          +--------+---------+
-          |                  |
-          v                  v
-    DATASET SERVICES    DATABASE SERVICES
-          |                  |
-          v                  v
-    DATA PROFILING       POSTGRESQL
-          |
-          v
-    DATA QUALITY
-          |
-          v
-    DATA CLEANING
-          |
-          v
-    BUSINESS PLANNER
-          |
-          v
-   ANALYTICAL EXECUTION
-          |
-          v
-    VISUALIZATIONS
-          |
-          v
-   AI INTERPRETATION
-          |
-          v
-   SAVED ANALYTICS
-          |
-          v
-      PDF REPORTS
-```
-
-The architecture separates dataset processing, analytical execution, database operations, and AI-assisted interpretation into distinct application responsibilities.
 
 ---
 
@@ -284,12 +277,15 @@ Insightforge-AI/
 │
 ├── docs/
 │   └── architecture/
+│       ├── InsightForge AI Project Workflow 2.png
+│       └── InsightForge AI Workflow Architecture.png
 │
 ├── scripts/
 │
 ├── .env.example
 ├── .gitignore
 ├── docker-compose.yml
+├── InsightForge_Analytics_Report_Sample.pdf
 └── README.md
 ```
 
@@ -361,7 +357,7 @@ http://127.0.0.1:8000/docs
 
 ### 3. Frontend Setup
 
-Open another terminal:
+Open another terminal and navigate to the frontend directory:
 
 ```powershell
 cd frontend
@@ -399,10 +395,10 @@ From the backend directory:
 pytest -q
 ```
 
-**Latest recorded backend test result (November 20, 2026):**
+**Latest recorded backend test result — November 20, 2026:**
 
 ```text
-241 passed, 1 warning
+243 passed, 1 warning
 ```
 
 The warning was a dependency deprecation warning.
@@ -415,25 +411,28 @@ From the frontend directory:
 npm run build
 ```
 
-The frontend production build was also successfully validated during the MVP deployment process.
+The frontend production build was successfully validated during the MVP deployment process.
 
 ---
 
 ## Deployment Architecture
 
-The publicly accessible application uses three primary hosting services:
+The publicly accessible application uses three primary hosting services.
 
 **Frontend — Vercel**
+
 - Hosts the Next.js application.
 - Provides public web access.
 - Forwards API requests to the backend.
 
 **Backend — Render**
+
 - Hosts the FastAPI application.
 - Handles dataset processing and analytical requests.
 - Connects to the PostgreSQL database.
 
 **Database — Neon**
+
 - Provides managed PostgreSQL hosting.
 - Stores application records and saved analytical information.
 
@@ -456,7 +455,7 @@ Database records stored in Neon are separate from files stored on Render's files
 - Correlation does not establish causation.
 - Statistical results require appropriate business and domain context.
 - File persistence on the current Render free deployment is limited by ephemeral storage.
-- The platform is an MVP and should not be represented as an enterprise-scale analytics infrastructure.
+- The platform is an MVP and should not be represented as enterprise-scale analytics infrastructure.
 
 ---
 
