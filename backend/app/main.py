@@ -1,6 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from contextlib import asynccontextmanager
+
+from app.db import Base, engine
+import app.models
+
 from app.api.health import router as health_router
 from app.api.upload import router as upload_router
 from app.api.profiling import router as profiling_router
@@ -17,10 +22,16 @@ from app.api.saved_artifacts import router as saved_artifacts_router
 from app.api.reports import router as reports_router
 from app.api.ai_interpretation import router as ai_interpretation_router
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    Base.metadata.create_all(bind=engine)
+    yield
+
 app = FastAPI(
     title="InsightForge AI API",
     version="0.1.0",
     description="Business Analytics & Decision Intelligence Platform API",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
