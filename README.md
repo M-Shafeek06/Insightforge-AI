@@ -46,7 +46,9 @@ It provides a structured workflow that connects data understanding with business
 The following diagram illustrates the end-to-end workflow of InsightForge AI, from dataset ingestion to analytical results and business decision support.
 
 <p align="center">
-  <img src="docs/architecture/InsightForge%20AI%20Project%20Workflow%202.png" alt="InsightForge AI - Complete Project Workflow" width="100%">
+  <img src="InsightForge%20AI%20Project%20Workflow%202.png"
+       alt="InsightForge AI - Complete Project Workflow"
+       width="100%">
 </p>
 
 ## System Architecture
@@ -54,7 +56,9 @@ The following diagram illustrates the end-to-end workflow of InsightForge AI, fr
 InsightForge AI follows a separated frontend and backend architecture. The frontend communicates with backend services through API requests, while data processing, analytical operations, persistence, and AI-assisted interpretation are handled by their respective application components.
 
 <p align="center">
-  <img src="docs/architecture/InsightForge%20AI%20Workflow%20Architecture.png" alt="InsightForge AI - System Architecture" width="100%">
+  <img src="InsightForge%20AI%20Workflow%20Architecture.png"
+       alt="InsightForge AI - System Architecture"
+       width="100%">
 </p>
 
 ---
