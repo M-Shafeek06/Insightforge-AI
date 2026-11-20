@@ -36,8 +36,12 @@ function formatInterval(interval: TrendAnalyticsResponse["interval"]): string {
       return "Weekly";
     case "month":
       return "Monthly";
+    case "quarter":
+      return "Quarterly";
     case "year":
       return "Yearly";
+    default:
+      return "Unknown";
   }
 }
 

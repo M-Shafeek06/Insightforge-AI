@@ -6,6 +6,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from app.services.date_parsing import parse_date_series
+
 
 class CleaningValidationError(ValueError):
     """Raised when a cleaning operation is invalid or unsafe."""
@@ -129,67 +131,39 @@ def _validate_datetime_conversion(
     series: pd.Series,
     column: str,
 ) -> pd.Series:
-    """Validate text-to-datetime conversion conservatively."""
+    """Convert date values deterministically without guessing ambiguous formats."""
+
+    # Native datetime columns are already converted. Treat the operation as
+    # idempotent so users can safely apply an auto-generated cleaning plan.
+    if pd.api.types.is_datetime64_any_dtype(series.dtype):
+        return series.copy()
 
     if not _is_text_column(series):
         raise CleaningValidationError(
-            f"Datetime conversion is only allowed for text columns. "
-            f"'{column}' is not a suitable text column."
+            f"Datetime conversion is only allowed for text or datetime columns. "
+            f"'{column}' is not a suitable column."
         )
 
     non_null = series.dropna()
-
     if non_null.empty:
         raise CleaningValidationError(
             f"Column '{column}' has no values to convert."
         )
 
-    # Reject pure numeric strings because they may be IDs,
-    # timestamps, or measurements rather than calendar dates.
+    # Numeric-only strings may be IDs, timestamps, or measurements.
     numeric_only_mask = non_null.str.fullmatch(r"\s*[+-]?\d+(\.\d+)?\s*")
-
     if numeric_only_mask.any():
         raise CleaningValidationError(
             f"Cannot safely convert '{column}' to datetime: "
             "numeric-only values are not accepted as dates."
         )
 
-    # Reject ambiguous dates such as 01/02/2026.
-    for value in non_null:
-        match = AMBIGUOUS_DATE_PATTERN.match(value)
-
-        if match:
-            first = int(match.group(1))
-            second = int(match.group(2))
-
-            if (
-                1 <= first <= 12
-                and 1 <= second <= 12
-                and first != second
-            ):
-                raise CleaningValidationError(
-                    f"Cannot safely convert '{column}': "
-                    f"ambiguous date value '{value}' found. "
-                    "Use an unambiguous date format such as YYYY-MM-DD."
-                )
-
-    # Invalid non-empty values are converted to NaT rather than blocking the
-    # entire cleaning plan. The operation result reports the exact invalid
-    # count, and the before/after preview makes the resulting NULLs visible.
-    # The source DataFrame remains untouched because all operations run on a
-    # deep copy.
     try:
-        converted = pd.to_datetime(
-            series,
-            errors="coerce",
-            format="mixed",
-        )
+        # Explicit column-name hints take precedence; unresolved ambiguous
+        # slash dates remain rejected by the shared parser.
+        return parse_date_series(series, column=column)
     except (ValueError, TypeError, OverflowError) as exc:
-        raise CleaningValidationError(
-            f"Unable to parse date values in '{column}'."
-        ) from exc
-
-    return converted
+        raise CleaningValidationError(str(exc)) from exc
 
 
 def _validate_constant_value(
@@ -567,10 +541,21 @@ def _apply_operation(
             column,
         )
 
-        invalid_mask = series.notna() & converted.isna()
+        # Treat whitespace-only text as blank input, not as an invalid date.
+        # This keeps cleaning diagnostics consistent with dataset profiling.
+        empty_text_mask = (
+            series.astype("string").str.strip().eq("").fillna(False)
+        )
+        invalid_mask = (
+            series.notna()
+            & ~empty_text_mask
+            & converted.isna()
+        )
         invalid_count = int(invalid_mask.sum())
         converted_count = int(converted.notna().sum())
-        original_missing_count = int(series.isna().sum())
+        original_missing_count = int(
+            series.isna().sum() + empty_text_mask.sum()
+        )
 
         result = df.copy()
         result[column] = converted

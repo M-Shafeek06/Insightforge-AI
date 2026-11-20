@@ -1,4 +1,4 @@
-﻿from enum import Enum
+from enum import Enum
 from typing import Literal
 from uuid import UUID
 
@@ -26,6 +26,7 @@ class TrendInterval(str, Enum):
     DAY = "day"
     WEEK = "week"
     MONTH = "month"
+    QUARTER = "quarter"
     YEAR = "year"
 
 

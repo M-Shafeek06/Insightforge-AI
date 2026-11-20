@@ -1414,6 +1414,7 @@ function handleCancelAIInterpretation() {
                   <option value="day">Daily</option>
                   <option value="week">Weekly</option>
                   <option value="month">Monthly</option>
+                  <option value="quarter">Quarterly</option>
                   <option value="year">Yearly</option>
                 </select>
               </div>

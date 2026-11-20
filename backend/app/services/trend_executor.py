@@ -30,6 +30,7 @@ def execute_trend(
     - Day
     - Week
     - Month
+    - Quarter
     - Year
 
     Supported aggregations:
@@ -73,12 +74,13 @@ def execute_trend(
             "day": "day",
             "week": "week",
             "month": "month",
+            "quarter": "quarter",
             "year": "year",
         }
 
         if interval not in frequencies:
             raise AnalyticsExecutionError(
-                "Unsupported interval. Use day, week, month, or year."
+                "Unsupported interval. Use day, week, month, quarter, or year."
             )
 
         if aggregation not in {

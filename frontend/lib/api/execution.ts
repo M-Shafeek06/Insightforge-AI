@@ -6,7 +6,12 @@ export type ExecutionAggregation =
   | "max"
   | "median";
 
-export type TrendInterval = "day" | "week" | "month" | "year";
+export type TrendInterval =
+  | "day"
+  | "week"
+  | "month"
+  | "quarter"
+  | "year";
 
 // -----------------------------------------------------------------------------
 // Request Types

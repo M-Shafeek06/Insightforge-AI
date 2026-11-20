@@ -7,6 +7,7 @@ import pandas as pd
 
 from app.data.loaders.tabular import load_tabular_file
 from app.services.profiler import _semantic_role
+from app.services.date_parsing import DateFormatAmbiguityError, parse_date_series
 
 
 def _severity_from_percentage(percentage: float) -> str:
@@ -162,7 +163,13 @@ def assess_dataset_quality(
             if non_null.empty:
                 continue
 
-            parsed = pd.to_datetime(non_null, errors="coerce")
+            try:
+                parsed = parse_date_series(non_null, column=str(column))
+            except (DateFormatAmbiguityError, ValueError):
+                # Keep the column flagged as date-like text. The cleaning
+                # workflow will request a format rather than guessing.
+                parsed = pd.Series(pd.NaT, index=non_null.index)
+
             invalid_count = int(parsed.isna().sum())
 
             if invalid_count > 0:
