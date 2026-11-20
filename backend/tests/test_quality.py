@@ -144,3 +144,30 @@ def test_quality_detects_high_cardinality_with_missing_values(tmp_path):
     assert issues[0]["column"] == "CustomerID"
     assert issues[0]["affected_rows"] == 90
     assert issues[0]["affected_percentage"] == 90.0
+
+
+def test_quality_does_not_flag_valid_year_month_values(tmp_path):
+    dataset = pd.DataFrame({
+        "Order_Month": [
+            "2025-10",
+            "2025-01",
+            "2024-10",
+            "2024-09",
+        ]
+    })
+
+    path = Path(tmp_path) / "year_month.csv"
+    dataset.to_csv(path, index=False)
+
+    result = assess_dataset_quality(
+        path=path,
+        dataset_id="test-year-month",
+    )
+
+    issues = [
+        issue for issue in result["issues"]
+        if issue["column"] == "Order_Month"
+        and issue["issue_type"] == "invalid_date_values"
+    ]
+
+    assert len(issues) == 0

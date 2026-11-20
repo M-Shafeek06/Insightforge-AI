@@ -91,3 +91,29 @@ def test_ambiguous_slash_values_in_mixed_column_are_not_guessed():
     assert parsed.iloc[0].strftime("%Y-%m-%d") == "2025-01-10"
     assert pd.isna(parsed.iloc[1])
     assert parsed.iloc[2].strftime("%Y-%m-%d") == "2025-04-13"
+
+
+def test_year_month_format_is_supported():
+    source = pd.Series([
+        "2025-10",
+        "2025-01",
+        "2024-10",
+        "2024-09",
+    ])
+
+    parsed = parse_date_series(
+        source,
+        column="Order_Month",
+    )
+
+    assert parsed.notna().all()
+
+    assert [
+        value.strftime("%Y-%m")
+        for value in parsed
+    ] == [
+        "2025-10",
+        "2025-01",
+        "2024-10",
+        "2024-09",
+    ]
